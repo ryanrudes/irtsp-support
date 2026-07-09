@@ -76,6 +76,20 @@
       It has no account, no cloud, and collects no data. See the <a href="privacy.html">privacy policy</a>.</span></li>
   </ul>
 
+  <h2>For developers</h2>
+  <div class="card">
+    <h3>Build on the streams</h3>
+    <p>iRTSP is also a live sensor rig: video over RTSP plus a time-synced IMU / GPS / LiDAR-depth /
+      ARKit-pose side-channel, all on one shared clock — so the video and odometry line up with no
+      time offset to estimate. The guide documents the exact wire formats and the synchronization model.</p>
+    <div class="contact"><a class="btn" href="https://github.com/ryanrudes/irtsp-support/blob/main/INTEGRATION.md">📖 Integration guide</a></div>
+    <p style="margin-top:16px">Minimal working clients:
+      <a href="https://github.com/ryanrudes/irtsp-support/blob/main/examples/irtsp_client.py">Python</a> ·
+      <a href="https://github.com/ryanrudes/irtsp-support/blob/main/examples/irtsp_client.cpp">C++</a> ·
+      <a href="https://github.com/ryanrudes/irtsp-support/blob/main/examples/irtsp_ros2_node.py">ROS 2 node</a>
+    </p>
+  </div>
+
   <footer>
     <span>iRTSP · com.ryanrudes.iRTSP</span>
     <span><a href="privacy.html">Privacy Policy</a></span>
