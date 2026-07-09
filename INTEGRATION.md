@@ -266,8 +266,8 @@ Event-driven (bursts to ~10+ Hz on motion). Native timestamp is wall time.
 | 48 | `qx`, `qy`, `qz`, `qw` (f32×4) | unit quaternion, world orientation |
 
 Frame: **gravity-aligned world, origin at session start**. `host_ts` is `ARFrame.timestamp`
-(same axis as the video PTS), so pose lines up with video frames directly. Rate follows ARKit
-(~60 Hz). This is iRTSP's own on-device VIO estimate — useful as ground-truth/comparison or a
+(same axis as the video PTS), so pose lines up with video frames directly. Rate matches the AR camera's
+frame rate (30–60 Hz; measured 30 Hz on an iPhone 17 Pro). This is iRTSP's own on-device VIO estimate — useful as ground-truth/comparison or a
 prior, not a substitute for your own fusion if you want raw inputs.
 
 ### 5.4 The handshake fields
