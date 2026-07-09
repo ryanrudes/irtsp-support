@@ -8,6 +8,8 @@ VIO, robotics, and AR. (This repo holds only the public support/docs site, not t
 - **[Privacy policy](https://ryanrudes.github.io/irtsp-support/privacy.html)**
 - **[Integration guide](INTEGRATION.md)** — exact wire formats, the shared clock model, and
   how the **video and odometric streams stay synchronized** (RTP/RTCP ↔ IMU/pose/depth).
+- **[Python library `irtsp`](https://github.com/ryanrudes/irtsp-python)** — `pip install irtsp`; typed,
+  SI-unit records, discovery, asyncio, and time-aligned video+odometry bundles.
 - **Example clients** ([examples/](examples/)) —
   [Python](examples/irtsp_client.py) ·
   [C++](examples/irtsp_client.cpp) ·

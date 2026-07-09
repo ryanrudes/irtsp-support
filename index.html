@@ -82,8 +82,12 @@
     <p>iRTSP is also a live sensor rig: video over RTSP plus a time-synced IMU / GPS / LiDAR-depth /
       ARKit-pose side-channel, all on one shared clock — so the video and odometry line up with no
       time offset to estimate. The guide documents the exact wire formats and the synchronization model.</p>
-    <div class="contact"><a class="btn" href="https://github.com/ryanrudes/irtsp-support/blob/main/INTEGRATION.md">📖 Integration guide</a></div>
-    <p style="margin-top:16px">Minimal working clients:
+    <div class="contact">
+      <a class="btn" href="https://github.com/ryanrudes/irtsp-python">🐍 Python library — pip install irtsp</a>
+      <a class="btn" style="background:transparent;color:var(--signal);border:1px solid var(--signal)" href="https://github.com/ryanrudes/irtsp-support/blob/main/INTEGRATION.md">📖 Integration guide</a>
+    </div>
+    <p style="margin-top:16px">The <a href="https://github.com/ryanrudes/irtsp-python">irtsp</a> package gives you typed,
+      SI-unit records and time-aligned video+odometry bundles in a few lines. Prefer raw sockets? Minimal clients:
       <a href="https://github.com/ryanrudes/irtsp-support/blob/main/examples/irtsp_client.py">Python</a> ·
       <a href="https://github.com/ryanrudes/irtsp-support/blob/main/examples/irtsp_client.cpp">C++</a> ·
       <a href="https://github.com/ryanrudes/irtsp-support/blob/main/examples/irtsp_ros2_node.py">ROS 2 node</a>

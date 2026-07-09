@@ -4,6 +4,11 @@ How to consume iRTSP's streams from your own software, and — the important par
 video and the odometric (IMU / GPS / pose / depth) streams are timestamped so you can fuse
 them without guessing at the temporal alignment.
 
+> **Shortcut:** the official Python client, [`irtsp`](https://github.com/ryanrudes/irtsp-python)
+> (`pip install irtsp`), implements everything on this page — typed records, the shared clock,
+> discovery, depth, and synced video bundles. Read on if you're integrating from another language
+> or want the byte-level details.
+
 Everything here is the actual wire format. Field offsets, units, and endianness are taken
 directly from `Sources/IMU/IMUWireFormat.swift`, `Sources/IMU/DepthStreamServer.swift`,
 `Sources/Motion/StreamClock.swift`, and `Sources/RTP/RTCP.swift`.
