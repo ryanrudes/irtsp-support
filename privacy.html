@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iRTSP — Privacy Policy</title>
+<style>
+  :root{
+    --ground:#080B11;--panel:#0E1621;--panel2:#131E2B;--ink:#EAF3F7;--ink2:#B7C6D2;
+    --muted:#7A8A98;--line:#1E2C3B;--signal:#35E4C7;--signal2:#12b39b;
+    --fdisplay:-apple-system,"SF Pro Display",system-ui,"Segoe UI",Roboto,sans-serif;
+    --fmono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:linear-gradient(180deg,var(--ground),#0B111A);color:var(--ink);
+    font-family:var(--fdisplay);line-height:1.65;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:720px;margin:0 auto;padding:56px 24px 90px}
+  .brand{display:flex;align-items:center;gap:13px;margin-bottom:40px}
+  .glyph{width:36px;height:36px;border-radius:10px;position:relative;
+    background:radial-gradient(circle at 50% 42%,var(--signal),var(--signal2) 62%,#06231f);
+    box-shadow:0 0 0 1px #28384A}
+  .glyph::after{content:"";position:absolute;inset:0;margin:auto;width:12px;height:12px;border-radius:50%;
+    background:var(--ground);box-shadow:0 0 0 3px rgba(53,228,199,.4)}
+  .brand b{font-size:20px;font-weight:800;letter-spacing:-.02em}
+  .brand b span{color:var(--signal)}
+  .eyebrow{font-family:var(--fmono);font-size:12px;letter-spacing:.2em;text-transform:uppercase;color:var(--signal);margin:0 0 10px}
+  h1{font-size:clamp(26px,4vw,34px);letter-spacing:-.02em;margin:0 0 6px;font-weight:850}
+  .updated{color:var(--muted);font-family:var(--fmono);font-size:13px;margin:0 0 34px}
+  h2{font-size:18px;margin:36px 0 10px;letter-spacing:-.01em}
+  p,li{color:var(--ink2);font-size:15.5px}
+  strong{color:var(--ink)}
+  a{color:var(--signal);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .callout{border:1px solid var(--line);border-left:3px solid var(--signal);border-radius:12px;
+    padding:16px 20px;background:linear-gradient(180deg,var(--panel),var(--panel2));margin:22px 0}
+  .callout p{margin:0;color:var(--ink)}
+  footer{margin-top:52px;padding-top:20px;border-top:1px solid var(--line);color:var(--muted);font-family:var(--fmono);font-size:12.5px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><span class="glyph"></span><b>i<span>RTSP</span></b></div>
+  <p class="eyebrow">Privacy Policy</p>
+  <h1>Privacy Policy</h1>
+  <p class="updated">Last updated: July 9, 2026</p>
+
+  <div class="callout"><p><strong>iRTSP does not collect any data.</strong> It has no account, no analytics,
+    no advertising, and no servers of its own. Nothing you capture or stream ever reaches the developer or
+    any third party.</p></div>
+
+  <h2>What iRTSP does</h2>
+  <p>iRTSP runs a standard RTSP camera server on your device. Your camera, microphone, and — if you enable
+    them — motion (IMU), location, altitude, LiDAR depth, and ARKit pose data are transmitted <strong>only over
+    your own local network</strong> (Wi-Fi or hotspot) to players you choose to connect, such as VLC, ffmpeg, or
+    OBS. This is a direct, peer-to-peer, real-time stream.</p>
+
+  <h2>Data collection</h2>
+  <p>The developer does <strong>not</strong> collect, store, transmit to any server, sell, or share any personal
+    data or usage data. iRTSP contains no analytics or advertising SDKs. Because there is no cloud component,
+    there is nothing for the developer to access.</p>
+
+  <h2>Device permissions</h2>
+  <p>iRTSP asks for permissions only to provide its features, and only while you use them:</p>
+  <ul>
+    <li><strong>Camera &amp; Microphone</strong> — to capture the video and audio you stream.</li>
+    <li><strong>Local Network</strong> — to serve the RTSP stream and advertise it via Bonjour on your LAN.</li>
+    <li><strong>Location</strong> (optional) — only if you enable the GPS/heading channel; used to include location
+      in your stream. It is not stored or sent anywhere by the developer.</li>
+    <li><strong>Motion</strong> (optional) — only if you enable the IMU/altitude channel.</li>
+  </ul>
+  <p>All of this data stays on your local network and is never retained by the developer.</p>
+
+  <h2>Children's privacy</h2>
+  <p>iRTSP is rated 4+ and does not collect data from anyone, including children.</p>
+
+  <h2>Changes</h2>
+  <p>If this policy changes, the updated version will be posted on this page with a new date.</p>
+
+  <h2>Contact</h2>
+  <p>Questions about privacy? Email <a href="mailto:ryanrudes@gmail.com">ryanrudes@gmail.com</a>.</p>
+
+  <footer>iRTSP · com.ryanrudes.iRTSP · <a href="index.html">Support</a></footer>
+</div>
+</body>
+</html>

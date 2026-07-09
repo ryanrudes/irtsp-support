@@ -1,0 +1,85 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>iRTSP — Support</title>
+<style>
+  :root{
+    --ground:#080B11;--panel:#0E1621;--panel2:#131E2B;--ink:#EAF3F7;--ink2:#B7C6D2;
+    --muted:#7A8A98;--line:#1E2C3B;--signal:#35E4C7;--signal2:#12b39b;
+    --fdisplay:-apple-system,"SF Pro Display",system-ui,"Segoe UI",Roboto,sans-serif;
+    --fmono:ui-monospace,"SF Mono",Menlo,Consolas,monospace;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:
+      radial-gradient(1100px 640px at 82% -10%,rgba(53,228,199,.16),transparent 60%),
+      linear-gradient(180deg,var(--ground),#0B111A);
+    color:var(--ink);font-family:var(--fdisplay);line-height:1.6;-webkit-font-smoothing:antialiased}
+  .wrap{max-width:760px;margin:0 auto;padding:56px 24px 90px}
+  .brand{display:flex;align-items:center;gap:13px;margin-bottom:44px}
+  .glyph{width:40px;height:40px;border-radius:11px;position:relative;
+    background:radial-gradient(circle at 50% 42%,var(--signal),var(--signal2) 62%,#06231f);
+    box-shadow:0 0 0 1px #28384A,0 0 22px -4px rgba(53,228,199,.4)}
+  .glyph::after{content:"";position:absolute;inset:0;margin:auto;width:13px;height:13px;border-radius:50%;
+    background:var(--ground);box-shadow:0 0 0 3px rgba(53,228,199,.4)}
+  .brand b{font-size:22px;font-weight:800;letter-spacing:-.02em}
+  .brand b span{color:var(--signal)}
+  .eyebrow{font-family:var(--fmono);font-size:12px;letter-spacing:.22em;text-transform:uppercase;color:var(--signal);margin:0 0 12px}
+  h1{font-size:clamp(28px,5vw,40px);line-height:1.08;letter-spacing:-.03em;margin:0 0 14px;font-weight:850}
+  .lede{color:var(--ink2);font-size:17px;max-width:600px}
+  h2{font-size:14px;font-family:var(--fmono);letter-spacing:.14em;text-transform:uppercase;color:var(--ink2);margin:48px 0 16px;font-weight:600}
+  .card{border:1px solid var(--line);border-radius:16px;padding:22px 24px;background:linear-gradient(180deg,var(--panel),var(--panel2));margin-bottom:14px}
+  .card h3{margin:0 0 6px;font-size:16px}
+  .card p{margin:0;color:var(--ink2);font-size:14.5px}
+  a{color:var(--signal);text-decoration:none}
+  a:hover{text-decoration:underline}
+  .contact{display:flex;flex-wrap:wrap;gap:12px;align-items:center;margin-top:8px}
+  .btn{display:inline-flex;align-items:center;gap:8px;font-family:var(--fmono);font-size:14px;
+    color:#04231e;background:var(--signal);padding:11px 18px;border-radius:11px;font-weight:700}
+  .btn:hover{text-decoration:none;filter:brightness(1.06)}
+  ul.faq{list-style:none;padding:0;margin:0}
+  ul.faq li{border-top:1px solid var(--line);padding:18px 0}
+  ul.faq li:first-child{border-top:0}
+  ul.faq b{display:block;margin-bottom:5px;font-size:15px}
+  ul.faq span{color:var(--ink2);font-size:14.5px}
+  code{font-family:var(--fmono);font-size:.9em;background:rgba(53,228,199,.1);padding:2px 6px;border-radius:5px;color:var(--signal)}
+  footer{margin-top:56px;padding-top:22px;border-top:1px solid var(--line);color:var(--muted);font-family:var(--fmono);font-size:12.5px;display:flex;justify-content:space-between;flex-wrap:wrap;gap:12px}
+</style>
+</head>
+<body>
+<div class="wrap">
+  <div class="brand"><span class="glyph"></span><b>i<span>RTSP</span></b></div>
+
+  <p class="eyebrow">Support</p>
+  <h1>iRTSP help &amp; contact</h1>
+  <p class="lede">iRTSP turns your iPhone into a standard RTSP camera server with time-synced IMU, GPS,
+    LiDAR depth, and ARKit pose — built for VIO, robotics, and AR. Everything streams on your own
+    local network; nothing leaves it.</p>
+
+  <h2>Get in touch</h2>
+  <div class="card">
+    <h3>Questions, bugs, or feature requests</h3>
+    <p>Email and I'll get back to you. Please include your iPhone model and iOS version.</p>
+    <div class="contact"><a class="btn" href="mailto:ryanrudes@gmail.com?subject=iRTSP%20Support">✉ ryanrudes@gmail.com</a></div>
+  </div>
+
+  <h2>Common questions</h2>
+  <ul class="faq">
+    <li><b>How do I view the stream?</b><span>Tap Record, then point any RTSP player (VLC, ffmpeg, OBS) on the
+      same Wi-Fi or hotspot at the <code>rtsp://…</code> URL the app shows (or scan its QR code).</span></li>
+    <li><b>Nothing connects.</b><span>Make sure the player and iPhone are on the same network, and that Local
+      Network access is allowed for iRTSP in Settings → Privacy &amp; Security → Local Network.</span></li>
+    <li><b>How do I read the IMU / GPS / depth / pose data?</b><span>The optional sensor channels are advertised
+      over Bonjour on separate ports alongside the video. They're opt-in and off by default.</span></li>
+    <li><b>Does my footage go to the cloud?</b><span>No. iRTSP streams peer-to-peer on your local network only.
+      It has no account, no cloud, and collects no data. See the <a href="privacy.html">privacy policy</a>.</span></li>
+  </ul>
+
+  <footer>
+    <span>iRTSP · com.ryanrudes.iRTSP</span>
+    <span><a href="privacy.html">Privacy Policy</a></span>
+  </footer>
+</div>
+</body>
+</html>
