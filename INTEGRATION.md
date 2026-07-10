@@ -265,8 +265,17 @@ Event-driven (bursts to ~10+ Hz on motion). Native timestamp is wall time.
 | 36 | `trackingState` (f32) | 0 = none, 1 = limited, 2 = normal |
 | 48 | `qx`, `qy`, `qz`, `qw` (f32×4) | unit quaternion, world orientation |
 
-Frame: **gravity-aligned world, origin at session start**. `host_ts` is `ARFrame.timestamp`
-(same axis as the video PTS), so pose lines up with video frames directly. Rate matches the AR camera's
+Frame: **gravity-aligned world (+Y up), origin & yaw at session start**. The pose is
+`ARCamera.transform` — the **ARKit camera frame** (in sensor-native landscape: +X right,
++Y up, +Z toward the viewer; optical axis = −Z). To use it with the type-5 intrinsics in a
+standard CV pinhole frame (+Z forward, +Y down), apply `R_cv = R_arkit · diag(1, −1, −1)`.
+`host_ts` is `ARFrame.timestamp` (same axis as the video PTS), so pose lines up with video
+frames directly.
+
+**Discontinuity flag (app ≥ 1.1):** the shared header's `flags` byte (offset 1) uses **bit0**
+on type-9 records to mark the *first pose after an ARKit session interruption or
+relocalization* — the world frame may have jumped; re-anchor any registration. `flags` is 0
+in all other cases and on older app versions. Rate matches the AR camera's
 frame rate (30–60 Hz; measured 30 Hz on an iPhone 17 Pro). This is iRTSP's own on-device VIO estimate — useful as ground-truth/comparison or a
 prior, not a substitute for your own fusion if you want raw inputs.
 
@@ -321,7 +330,10 @@ Per frame:  [u32 LE frame_len][frame_len bytes = 32-byte header + samples]
 | 29..31 | — | padding |
 
 **Samples**: immediately after the header, `width × height` **IEEE-754 half floats**, row-major,
-each = **distance from the camera in meters**. `host_ts`/`unix_ts` are the same two axes as §3,
+each = **z-depth in meters** (distance along the optical axis, not radial range — back-project
+with `x=(u−cx)·z/fx`, `y=(v−cy)·z/fy`). The source is AVFoundation's LiDAR depth output
+(typically ~320×240, ≤30 Hz — read the per-frame header for the real dims; note this is *not*
+ARKit's 256×192 `sceneDepth`), with Apple's default hole-filling/smoothing filter applied. `host_ts`/`unix_ts` are the same two axes as §3,
 so a depth frame drops onto the video/IMU timeline exactly like everything else.
 
 Depth resolution is lower than video; the depth-channel handshake reminds you to scale the
