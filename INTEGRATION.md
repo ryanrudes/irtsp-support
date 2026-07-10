@@ -331,9 +331,14 @@ Per frame:  [u32 LE frame_len][frame_len bytes = 32-byte header + samples]
 
 **Samples**: immediately after the header, `width × height` **IEEE-754 half floats**, row-major,
 each = **z-depth in meters** (distance along the optical axis, not radial range — back-project
-with `x=(u−cx)·z/fx`, `y=(v−cy)·z/fy`). The source is AVFoundation's LiDAR depth output
-(typically ~320×240, ≤30 Hz — read the per-frame header for the real dims; note this is *not*
-ARKit's 256×192 `sceneDepth`), with Apple's default hole-filling/smoothing filter applied. `host_ts`/`unix_ts` are the same two axes as §3,
+with `x=(u−cx)·z/fx`, `y=(v−cy)·z/fy`). Always read the per-frame header for the real dims;
+the source depends on the capture mode (app ≥ 1.1):
+
+* **Normal mode**: AVFoundation's LiDAR depth output — typically ~320×240, ≤30 Hz, with
+  Apple's default hole-filling/smoothing filter applied.
+* **ARKit pose mode**: ARKit `sceneDepth` — 256×192 at the AR camera's frame rate, aligned to
+  the AR video frames (same `host_ts` axis), so **pose + video + depth stream together** from
+  one session. (App 1.0 had no depth channel in AR mode.) `host_ts`/`unix_ts` are the same two axes as §3,
 so a depth frame drops onto the video/IMU timeline exactly like everything else.
 
 Depth resolution is lower than video; the depth-channel handshake reminds you to scale the
