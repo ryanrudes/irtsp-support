@@ -203,11 +203,17 @@ offset 24:
 | Offset | Field | Units |
 |---|---|---|
 | 24 | `gyro.x`,`gyro.y`,`gyro.z` (f32×3) | rad/s |
-| 36 | `accel.x`,`accel.y`,`accel.z` (f32×3) | **g** (× 9.80665 for m/s²). CoreMotion `gravity + userAcceleration` (i.e. gravity is included, not removed); face-up at rest ≈ (0, 0, −1). |
+| 36 | `accel.x`,`accel.y`,`accel.z` (f32×3) | **g** *on the wire*. CoreMotion `gravity + userAcceleration` (i.e. gravity is included, not removed); face-up at rest ≈ (0, 0, −1). |
 | 48 | `quat.x`,`quat.y`,`quat.z`,`quat.w` (f32×4) | attitude, unit quaternion (present only if attitude enabled) |
 
+> **Units — don't convert twice.** The **wire** carries acceleration in **g**. The `irtsp`
+> Python client already normalizes to SI and gives you `accel` in **m/s²**, keeping the raw wire
+> value as `accel_g`. Multiply by 9.80665 only if you decode the 64-byte records yourself.
+
 Reference frames: body axes **X-right, Y-up, Z-out-of-screen**; attitude frame is CoreMotion
-`xArbitraryZVertical`. **Rate: fused device motion caps ≈100 Hz** regardless of the requested
+`xArbitraryZVertical` — i.e. the quaternion is **gravity-referenced** (Z vertical) with an
+**arbitrary, non-north X**. That makes it a good independent gravity witness, but it carries no
+absolute yaw. **Rate: fused device motion caps ≈100 Hz** regardless of the requested
 `rate_hz`. Always compute the true rate from `host_ts` deltas.
 
 *(Types 2 `gyro` and 3 `accel` carry the same slots but for the raw, unfused single-sensor mode;
@@ -263,6 +269,8 @@ Event-driven (bursts to ~10+ Hz on motion). Native timestamp is wall time.
 |---|---|---|
 | 24 | `tx`, `ty`, `tz` (f32×3) | meters, world translation |
 | 36 | `trackingState` (f32) | 0 = none, 1 = limited, 2 = normal |
+| 40 | `gravityTilt` (f32) | degrees between ARKit's world +Y and **true gravity** (§5.3.1) |
+| 44 | `gravityAzimuth` (f32) | degrees; which way the frame leans (§5.3.1) |
 | 48 | `qx`, `qy`, `qz`, `qw` (f32×4) | unit quaternion, world orientation |
 
 Frame: **gravity-aligned world (+Y up), origin & yaw at session start**. The pose is
@@ -270,14 +278,76 @@ Frame: **gravity-aligned world (+Y up), origin & yaw at session start**. The pos
 +Y up, +Z toward the viewer; optical axis = −Z). To use it with the type-5 intrinsics in a
 standard CV pinhole frame (+Z forward, +Y down), apply `R_cv = R_arkit · diag(1, −1, −1)`.
 `host_ts` is `ARFrame.timestamp` (same axis as the video PTS), so pose lines up with video
-frames directly.
+frames directly — the encoded frame *is* the `ARFrame.capturedImage` the pose was derived
+from, so there is no lens, crop, or warp between them. Rate matches the AR camera's frame
+rate (30–60 Hz; measured 30 Hz on an iPhone 17 Pro). This is iRTSP's own on-device VIO
+estimate — useful as ground-truth/comparison or a prior, not a substitute for your own
+fusion if you want raw inputs.
 
-**Discontinuity flag (app ≥ 1.1):** the shared header's `flags` byte (offset 1) uses **bit0**
-on type-9 records to mark the *first pose after an ARKit session interruption or
-relocalization* — the world frame may have jumped; re-anchor any registration. `flags` is 0
-in all other cases and on older app versions. Rate matches the AR camera's
-frame rate (30–60 Hz; measured 30 Hz on an iPhone 17 Pro). This is iRTSP's own on-device VIO estimate — useful as ground-truth/comparison or a
-prior, not a substitute for your own fusion if you want raw inputs.
+**Video stabilization is never applied** to a stream carrying odometry: in AR pose mode
+ARKit's `capturedImage` is the raw sensor frame, and on the normal capture path
+stabilization is force-disabled whenever any IMU/VIO channel is up.
+
+#### `flags` (offset 1) — the world frame moved
+
+`tracking = normal` is **not** a promise that the pose is continuous.
+
+| Bit | Name | Meaning |
+|---|---|---|
+| 0 | `discontinuity` | **Re-anchor here; do not integrate across this sample.** Set whenever bit1 or bit2 is set, and on session interruption. |
+| 1 | `relocalized` | Tracking recovered (`limited`/`none` → `normal`); ARKit re-anchors its map at this moment. |
+| 2 | `jump` | The pose took a kinematically impossible step (>10 m/s, or >45° rotation, between consecutive frames) while tracking stayed `normal` — a silent loop closure or map merge. |
+
+Branch on bit0; bits 1–2 only say *why*. Bit 2 exists because ARKit corrects the world frame
+on loop closure **without ever leaving `normal`** and without firing any callback — the pose
+itself is the only witness, so iRTSP detects those seams kinematically. On a measured outdoor
+capture there were 11 such re-anchors (worst: 6.04 m in a single 33 ms sample), every one with
+`tracking = normal`.
+
+#### 5.3.1 `gravityTilt` — is the world frame actually level?
+
+`worldAlignment = .gravity` promises world +Y is up, but **ARKit finds gravity from motion**.
+Start a session with the phone sitting still and barely move it, and the world frame can settle
+tens of degrees off vertical — with `trackingState = normal` for every pose, and nothing in the
+ARKit API admitting it. A measured capture ran **21.8° off**, silently corrupting every
+registration derived from it.
+
+`gravityTilt` is the angle between ARKit's world +Y and **true gravity from CoreMotion**. Zero
+is level; sustained non-zero means **walk the phone around** — the tilt collapses once ARKit
+sees translation.
+
+**You cannot compute this on the client.** Recovering it there means fitting a device→camera
+rotation from gravity samples, and that fit is **rank-deficient whenever the phone stays
+upright**: gravity barely moves in the device frame, so the fit absorbs the tilt and reports
+~0° no matter how tilted the world really is. On-device the device→camera relationship is a
+**known constant, not a fit**, so a single sample gives the true answer.
+
+`gravityAzimuth` is `atan2(z, x)` of world-frame gravity's horizontal component — meaningless
+and unstable as the tilt → 0. Together the pair carries the full two degrees of freedom of a
+unit vector, so you can rebuild world-frame gravity and hence the rotation that *levels* the
+frame:
+
+```python
+t, a = math.radians(gravity_tilt), math.radians(gravity_azimuth)
+g_world = (math.sin(t) * math.cos(a), -math.cos(t), math.sin(t) * math.sin(a))
+# == (0, -1, 0) exactly when ARKit's frame is perfectly level
+```
+
+Both fields are **NaN** when unavailable (raw IMU mode has no fused gravity). Older apps
+zero-filled these bytes: treat an exact `(0.0, 0.0)` pair as *unreported*, **not** as a
+perfectly level frame — that mistake is the precise false negative this field exists to catch.
+
+**Autofocus is ON by default in AR pose mode, and you should leave it on.** A moving lens does
+mean `fx`/`fy` breathe a few percent mid-stream (the type-5 records report it honestly, so your
+projection is right per-frame but not constant), which sounds like a reason to lock focus. It
+isn't, for close work: ARKit's locked focus is set for far tracking, and on an iPhone main
+camera (f ≈ 6.9 mm, f/1.8) the hyperfocal distance is ≈ 5.3 m — locked at infinity nothing
+nearer than ~5.3 m is sharp, and even locked at 1 m the near limit is ~0.84 m. A calibration
+board at 0.5 m is outside the sharp zone for any plausible lock, costing you corner detections
+on the exact ritual registration depends on. Autofocus was also suspected of causing a large
+pose-vs-image misalignment and was **measured and exonerated** (the lens hunted identically in
+the good and bad windows; the culprit was the un-converged gravity frame above). Lock focus only
+when your subject is beyond ~5 m *and* a constant focal length genuinely matters.
 
 ### 5.4 The handshake fields
 
