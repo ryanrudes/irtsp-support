@@ -294,15 +294,37 @@ stabilization is force-disabled whenever any IMU/VIO channel is up.
 
 | Bit | Name | Meaning |
 |---|---|---|
-| 0 | `discontinuity` | **Re-anchor here; do not integrate across this sample.** Set whenever bit1 or bit2 is set, and on session interruption. |
+| 0 | `discontinuity` | **Re-anchor here; do not integrate across this sample.** Set whenever bit1, bit2 or bit3 is set, and on session interruption. |
 | 1 | `relocalized` | Tracking recovered (`limited`/`none` → `normal`); ARKit re-anchors its map at this moment. |
 | 2 | `jump` | The pose took a kinematically impossible step (>10 m/s, or >45° rotation, between consecutive frames) while tracking stayed `normal` — a silent loop closure or map merge. |
+| 3 | `reset` | **The operator reset tracking.** A brand-new world frame starts here (see below). |
 
-Branch on bit0; bits 1–2 only say *why*. Bit 2 exists because ARKit corrects the world frame
-on loop closure **without ever leaving `normal`** and without firing any callback — the pose
-itself is the only witness, so iRTSP detects those seams kinematically. On a measured outdoor
+Branch on bit0; bits 1–3 say *why*, and the why matters. Bit 2 exists because ARKit corrects the
+world frame on loop closure **without ever leaving `normal`** and without firing any callback — the
+pose itself is the only witness, so iRTSP detects those seams kinematically. On a measured outdoor
 capture there were 11 such re-anchors (worst: 6.04 m in a single 33 ms sample), every one with
 `tracking = normal`.
+
+Bits 1–2 are **data-quality warnings**: something went wrong and the tracker papered over it. Bit 3
+is the opposite — it is **deliberate and clean**: an operator noticed a broken frame and fixed it.
+Report them differently. "A new epoch starts here" is right for a reset; "the phone teleported" is
+not.
+
+#### `reset` (bit 3) — a new world frame, not a skipped sample
+
+This is the one flag it is not enough to "honour" by dropping a sample. After a reset the world
+frame is **new in every respect** — new origin, new yaw, new gravity alignment. Every pose before it
+is expressed in a frame that **no longer exists**, and there is **no transform relating the two
+sides**. Nothing carries across.
+
+So: close your current epoch, start a fresh one, and re-derive every registration from scratch. A
+consumer that merely skips the flagged sample and keeps using its existing transform will silently
+go on producing confident, wrong results.
+
+`host_ts` **does** stay continuous across a reset (verified on-device: the step across a reset is
+exactly one frame interval). `ARFrame.timestamp` runs off system uptime, not session start, so the
+shared-clock contract in §3 holds — pose and video remain on the same axis. It is only the *spatial*
+frame that is replaced, never the clock.
 
 #### 5.3.1 `gravityTilt` — is the world frame actually level?
 
@@ -313,8 +335,30 @@ ARKit API admitting it. A measured capture ran **21.8° off**, silently corrupti
 registration derived from it.
 
 `gravityTilt` is the angle between ARKit's world +Y and **true gravity from CoreMotion**. Zero
-is level; sustained non-zero means **walk the phone around** — the tilt collapses once ARKit
-sees translation.
+is level.
+
+**A tilted frame is one of two very different things, and they need opposite responses.**
+
+*Un-converged* (mild, and improving): ARKit simply hasn't seen enough translation yet. Moving the
+phone genuinely fixes it — measured 5.5° → 0.6° in 16 seconds on a fresh session, and 21.8° → 2.0°
+across two board showings in the field.
+
+*Broken* (and it will never fix itself): ARKit settles its gravity alignment early in a session and
+**does not revisit it**. Measured: a frame 110° off — world "up" pointing sideways — was still 100°
+off after 40 seconds of walking with 417 poses of `normal` tracking. No amount of movement recovers
+this. The only cure is a **tracking reset** (flag bit 3).
+
+Note that magnitude does **not** separate the two — a 21.8° frame healed while a 110° frame did not,
+but there is no threshold between them. *Trend* separates them: extrapolate the rate of improvement
+and ask whether it will ever reach level. iRTSP's own UI does exactly this, and warns "keep moving"
+or "frame is broken — reset" accordingly.
+
+> **How frames get broken — and it's the default rig workflow.** Start the phone streaming, then set
+> it face-down on the table while you spend two minutes positioning the other cameras. ARKit
+> initialises with no parallax and no visual features, infers gravity from whatever it can, locks
+> that in, and drifts. By the time you pick the phone up, its world frame is unrecoverable and
+> nothing in ARKit's API will tell you. **Carry the phone while you rig, or reset tracking before you
+> record.**
 
 **You cannot compute this on the client.** Recovering it there means fitting a device→camera
 rotation from gravity samples, and that fit is **rank-deficient whenever the phone stays
