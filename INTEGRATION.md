@@ -333,9 +333,27 @@ g_world = (math.sin(t) * math.cos(a), -math.cos(t), math.sin(t) * math.sin(a))
 # == (0, -1, 0) exactly when ARKit's frame is perfectly level
 ```
 
-Both fields are **NaN** when unavailable (raw IMU mode has no fused gravity). Older apps
-zero-filled these bytes: treat an exact `(0.0, 0.0)` pair as *unreported*, **not** as a
-perfectly level frame — that mistake is the precise false negative this field exists to catch.
+**It is already a robust estimate — do not median it yourself.** CoreMotion's gravity is a fusion
+whose accelerometer correction goes transiently wrong while the device is being accelerated, so a
+raw per-sample tilt spikes under motion (measured: a level frame reading 0.3° at rest spiked to
+14.5° while the phone was waved around). The phone rejects gravity samples taken above **0.20 g**
+of linear acceleration and medians the rest over a **2-second** window.
+
+For reference, so you can predict when it will and won't have a value: a hand-held calibration-board
+showing sits at a median of **0.04–0.07 g**, and never goes more than **0.19 s** without an
+acceptable sample — so the estimate stays alive throughout, with 90–100% of samples feeding the
+median. Walking runs 0.1–0.3 g and still accepts ~92% of samples, which matters because walking is
+exactly when ARKit's frame converges.
+
+**NaN means "the phone cannot currently vouch for a value". Treat it as NOT level.** You will see
+it in raw IMU mode (no fused gravity), before the first trustworthy sample arrives, and
+**mid-session whenever the device has been in sustained motion long enough for every trustworthy
+sample to age out**. That last case is deliberate: holding a stale value under a fresh timestamp
+would be the same failure as `trackingState = normal` on a 30°-off frame.
+
+Older apps zero-filled these bytes, so also treat an exact `(0.0, 0.0)` pair as *unreported*,
+**not** as a perfectly level frame — that mistake is the precise false negative this field exists
+to catch.
 
 **Autofocus is ON by default in AR pose mode, and you should leave it on.** A moving lens does
 mean `fx`/`fy` breathe a few percent mid-stream (the type-5 records report it honestly, so your
