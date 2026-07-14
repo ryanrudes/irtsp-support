@@ -298,6 +298,12 @@ stabilization is force-disabled whenever any IMU/VIO channel is up.
 | 1 | `relocalized` | Tracking recovered (`limited`/`none` → `normal`); ARKit re-anchors its map at this moment. |
 | 2 | `jump` | The pose took a kinematically impossible step (>10 m/s, or >45° rotation, between consecutive frames) while tracking stayed `normal` — a silent loop closure or map merge. |
 | 3 | `reset` | **The operator reset tracking.** A brand-new world frame starts here (see below). |
+| 4 | `diverged` | **ARKit's position has provably run away. The take is not usable** (see below). |
+
+Pose byte **4** (formerly reserved) carries ARKit's `TrackingState.Reason`, valid when
+`trackingState = 1` (limited): `0` none · `1` initializing · `2` excessiveMotion ·
+`3` insufficientFeatures · `4` relocalizing · `5` unknown-future-reason. `relocalizing` is the
+one to watch — it explains a subsequent world-frame snap-back that otherwise looks like a teleport.
 
 Branch on bit0; bits 1–3 say *why*, and the why matters. Bit 2 exists because ARKit corrects the
 world frame on loop closure **without ever leaving `normal`** and without firing any callback — the
@@ -309,6 +315,29 @@ Bits 1–2 are **data-quality warnings**: something went wrong and the tracker p
 is the opposite — it is **deliberate and clean**: an operator noticed a broken frame and fixed it.
 Report them differently. "A new epoch starts here" is right for a reset; "the phone teleported" is
 not.
+
+#### `diverged` (bit 4) — the take is not usable
+
+The phone's own accelerometer says it is **sitting still** while ARKit's pose **runs away**. This is
+not a heuristic or a tuned threshold: it is two sensors that must agree, and don't.
+
+The capture that motivated it — the phone lay on a table for **16 seconds** (accelerometer σ = 0.01
+m/s², gyro 0–1 °/s) while its reported position **accelerated to 872 m**, with single-sample steps of
+964 m, and `trackingState = normal` throughout.
+
+**The cause is degenerate geometry, not poor features.** The operator had walked a brick plaza with
+the camera pointed down; 64–83% of the view was repeating pavers. Every brick corner looks like every
+other, so matches alias by one brick — *self-consistently* — and the filter confidently integrates a
+phantom flow. A feature-count check sees nothing wrong: the scene is feature-**rich**. Any repeating
+planar texture does it — brick, tiling, carpet, decking.
+
+Note what this catches that nothing else can: `gravityTilt` is **structurally blind** to it, because
+gravity can be perfectly correct while the position is nonsense. Watch for both; they fail
+independently.
+
+The gates are `accel σ < 0.08 m/s²` and `median |gyro| < 2 °/s` sustained ≥ 1.5 s (still), against
+ARKit path length `> 0.25 m/s` (moving). A phone on a table measures σ ≈ 0.01 and an ARKit pose speed
+of ~0.004 m/s, so the margins are 8× and 60× respectively — it does not cry wolf.
 
 #### `reset` (bit 3) — a new world frame, not a skipped sample
 
