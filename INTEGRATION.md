@@ -171,8 +171,9 @@ drift (single anchor, single monotonic host clock underneath).
 ```
 On connect (server → client):
   [u32 LE handshake_len][handshake_len bytes of UTF-8 JSON]
-  (if intrinsics streaming is on, one type-5 record is replayed right after the handshake so a
-   late joiner immediately has the camera model)
+  then a freshly-stamped snapshot of each state channel that has a value (one type-5
+  intrinsics record, one type-8 heading record) so a late joiner is calibrated immediately
+  (§5.2a)
 
 Then, forever:
   a back-to-back stream of fixed 64-byte records. No per-record length. Parser is literally:
@@ -180,6 +181,36 @@ Then, forever:
 ```
 
 Everything is **little-endian**; floats/doubles are IEEE-754.
+
+### 5.2a State channels vs. event channels (handshake v2)
+
+Not every channel *flows*. The handshake's `emission` map (v2+) classifies each stream:
+
+- **`continuous`** — samples at the channel's own rate while enabled (`imu`, `pose`, `depth`).
+- **`event`** — a record when the sensor reports (`gnss`, `altitude`, ~1 Hz each).
+- **`state`** — `intrinsics` and `heading` carry a *current value*, re-emitted only on
+  meaningful change. **Silence on a state channel means "unchanged", never "absent"** — and to
+  make that distinction observable, state channels additionally send:
+  1. **A snapshot on subscribe** — the current value, immediately after the handshake.
+  2. **A keyframe every `keyframe_interval_s`** (10 s) — the current value re-asserted to all
+     clients, so *any* ≥10 s slice of the stream is self-contained regardless of when you
+     joined or what you missed.
+
+  Snapshot/keyframe records are marked **`flags` bit0 = 1** and are **stamped at send time**
+  (they assert "the value as of now"); change events carry `flags = 0` and the sensor's own
+  timestamp. If you only care about the value, treat both identically; the flag exists so you
+  can tell a fresh measurement from a re-assertion.
+
+  A connect-snapshot is sent to one connection only and therefore **reuses the current `seq`
+  without incrementing** (it may duplicate the neighbouring record's `seq`); keyframes go to
+  everyone and increment `seq` normally. Gap detection on unflagged records is unaffected.
+
+  Heading change events are additionally **rate-capped to ~1 Hz**, except a change ≥5° is
+  forwarded immediately (walking fires CoreLocation at ~6 Hz of sub-degree jitter; the cap cuts
+  that ~6× with no loss for a coarse yaw witness). The cap never applies to snapshots/keyframes.
+
+Servers older than handshake `version: 2` emit state channels on-change only (plus a best-effort
+intrinsics replay at connect) — a short static take can legitimately contain zero rows there.
 
 ### 5.2 Common 64-byte record layout
 
@@ -189,8 +220,8 @@ offset 24:
 | Offset | Type | Field | Notes |
 |---|---|---|---|
 | 0 | u8 | `type` | 1 imu · 2 gyro · 3 accel · 5 intrinsics · 6 gnss · 7 altitude · 8 heading · 9 pose |
-| 1 | u8 | `flags` | 0 |
-| 2 | u16 | `seq` | per-channel counter, wraps; use it to detect dropped records |
+| 1 | u8 | `flags` | type-specific; 0 unless noted. Types 5/8: bit0 = snapshot/keyframe (§5.2a). Type 9: pose flags (§5.3). |
+| 2 | u16 | `seq` | per-channel counter, wraps; use it to detect dropped records (connect-snapshots reuse the current value — §5.2a) |
 | 4 | u32 | `reserved` | 0 |
 | 8 | f64 | `host_ts` | host-clock seconds (see §3) |
 | 16 | f64 | `unix_ts` | wall seconds (see §3) |
@@ -219,7 +250,7 @@ absolute yaw. **Rate: fused device motion caps ≈100 Hz** regardless of the req
 *(Types 2 `gyro` and 3 `accel` carry the same slots but for the raw, unfused single-sensor mode;
 in the default fused mode you receive type 1 only.)*
 
-**Type 5 — Camera intrinsics** (pinhole; sent on change, and replayed to late joiners)
+**Type 5 — Camera intrinsics** (pinhole; state channel — on change + snapshot + 10 s keyframes, §5.2a)
 
 | Offset | Field | |
 |---|---|---|
@@ -261,7 +292,9 @@ Rate ≈1 Hz. `host_ts` is native (host clock).
 | 28 | `magneticHeading` (f32) | degrees | |
 | 32 | `accuracy` (f32) | degrees | negative |
 
-Event-driven (bursts to ~10+ Hz on motion). Native timestamp is wall time.
+State channel (§5.2a): on-change capped ~1 Hz (immediate if ≥5°), plus a snapshot on connect and
+10 s keyframes. Change events carry the native wall-clock timestamp; snapshots/keyframes (flags
+bit0) are stamped at send time.
 
 **Type 9 — ARKit 6DOF world pose**
 
@@ -449,18 +482,27 @@ The JSON tells you, for this session: `endianness`, `record_bytes` (64), the ful
 
 ```json
 {
-  "protocol": "irtsp-imu", "version": 1, "endianness": "little", "record_bytes": 64,
+  "protocol": "irtsp-imu", "version": 2, "endianness": "little", "record_bytes": 64,
   "record_types": {"imu":1,"gyro":2,"accel":3,"intrinsics":5,"gnss":6,"altitude":7,"heading":8,"pose":9},
   "gyro_units": "rad/s", "accel_units": "g",
   "body_axes": "X-right, Y-up, Z-out-of-screen", "attitude_frame": "xArbitraryZVertical",
   "clock": {"timebase":"mach_absolute_time_seconds","host_anchor":<f64>,"wall_anchor":<f64>,
             "rtcp_sync":"unix_ts matches RTP RTCP SR NTP timeline"},
   "video": {"rtsp_url":"rtsp://…:8554/live","clock_rate":90000,"codec":"H264"},
-  "channel_rates_hz": {"imu":"<=100","gnss":"~1","heading":"event-driven (bursts to ~10+)",
+  "channel_rates_hz": {"imu":"<=100","gnss":"~1",
+                       "heading":"on-change, capped ~1 Hz (immediate if >=5 deg), + keyframes",
                        "altitude":"~1","depth":"<=30 (separate channel)"},
+  "emission": {"imu":"continuous","gyro":"continuous","accel":"continuous","pose":"continuous",
+               "gnss":"event","altitude":"event","intrinsics":"state","heading":"state"},
+  "state_channels": {"keyframe_interval_s":10,"flags":{"bit0":"snapshot_or_keyframe"},
+                     "note":"…snapshot-on-subscribe + keyframe semantics, §5.2a…"},
   "streams": {"imu":true,"intrinsics":true,"gnss":false,"altitude":false,"heading":false,"pose":false}
 }
 ```
+
+`version` bumped to **2** with the state-channel contract (`emission` + `state_channels`, §5.2a).
+A v1 server has neither key — treat its state channels as on-change-only and don't expect
+snapshots or keyframes.
 
 ---
 
@@ -472,7 +514,8 @@ rather than fixed-size.
 
 ```
 On connect: [u32 LE handshake_len][UTF-8 JSON handshake]
-Per frame:  [u32 LE frame_len][frame_len bytes = 32-byte header + samples]
+Per frame:  [u32 LE frame_len][frame_len bytes = 32-byte header + payload]
+Client → server (optional, v2): [u32 LE len][UTF-8 JSON control message] — see §6.1
 ```
 
 **32-byte frame header** (little-endian):
@@ -480,7 +523,7 @@ Per frame:  [u32 LE frame_len][frame_len bytes = 32-byte header + samples]
 | Offset | Type | Field |
 |---|---|---|
 | 0 | u8 | `type` = 10 |
-| 1 | u8 | `flags` (bit0 = samples are float16) |
+| 1 | u8 | `flags` (bit0 = samples are float16, bit1 = payload compressed, §6.1) |
 | 2 | u16 | `seq` |
 | 4 | u32 | reserved |
 | 8 | f64 | `host_ts` |
@@ -488,9 +531,11 @@ Per frame:  [u32 LE frame_len][frame_len bytes = 32-byte header + samples]
 | 24 | u16 | `width` |
 | 26 | u16 | `height` |
 | 28 | u8 | `bytesPerPixel` (2) |
-| 29..31 | — | padding |
+| 29 | u8 | `codec` (0 raw · 1 lzfse · 2 zlib; only meaningful when flags bit1 is set, §6.1) |
+| 30..31 | — | padding |
 
-**Samples**: immediately after the header, `width × height` **IEEE-754 half floats**, row-major,
+**Samples**: the payload (decompressed if flags bit1 — §6.1) is `width × height` **IEEE-754
+half floats**, row-major,
 each = **z-depth in meters** (distance along the optical axis, not radial range — back-project
 with `x=(u−cx)·z/fx`, `y=(v−cy)·z/fy`). Always read the per-frame header for the real dims;
 the source depends on the capture mode (app ≥ 1.1):
@@ -505,6 +550,35 @@ so a depth frame drops onto the video/IMU timeline exactly like everything else.
 Depth resolution is lower than video; the depth-channel handshake reminds you to scale the
 intrinsics (from the IMU channel, type 5) by `depth_width / video_width` before back-projecting.
 
+### 6.1 Lossless compression (handshake v2, negotiated)
+
+Raw f16 depth is ~2.2 MB/s at 30 Hz — 99.98% of the link — so v2 servers offer lossless
+per-frame payload compression. It is strictly **opt-in**: a client that never negotiates keeps
+receiving raw f16, bit-identical to v1. (The `irtsp` Python client negotiates automatically.)
+
+To opt in, send (any time after connect):
+
+```
+[u32 LE length][UTF-8 JSON]     e.g.  {"compression": "lzfse"}   or  "zlib"  or  "none"
+```
+
+Subsequent frames to *your* connection carry a compressed payload, marked `flags` bit1 with the
+codec id in header byte 29. Decompressed size is always `width × height × bytesPerPixel`.
+
+- **`zlib`** is raw DEFLATE (RFC 1951, **no** zlib header/checksum): `zlib.decompress(payload, -15)`
+  in Python — zero added dependencies anywhere.
+- **`lzfse`** is Apple's LZFSE buffer format — faster and tighter, needs a decoder
+  (`pyliblzfse` in Python).
+
+Two rules keep decoding simple and safe:
+1. **Every frame is independently decodable** — no inter-frame delta, so a dropped frame never
+   corrupts the next one and any frame can be decoded in isolation.
+2. **Branch on the per-frame flags, not on what you negotiated** — a frame that doesn't shrink
+   (rare; noisy scenes) is sent raw with bit1 clear even after opt-in.
+
+The handshake's `compression` object (v2+) lists `supported` codecs and repeats these
+instructions; its absence means a v1 server (raw only, don't send control messages).
+
 ---
 
 ## 7. Putting it together — a fusion recipe
@@ -514,8 +588,10 @@ intrinsics (from the IMU channel, type 5) by `depth_width / video_width` before 
 2. Open the IMU channel (8555):
      read u32 len; read len bytes → parse JSON handshake (keep host_anchor, wall_anchor).
      loop: read exactly 64 bytes; dispatch on byte[0]; decode per §5.3.
-3. (Optional) Open the depth channel (8556): read handshake; then loop
-     read u32 len; read len bytes; split into 32-byte header + half-float map (§6).
+3. (Optional) Open the depth channel (8556): read handshake (optionally opt in to
+     compression, §6.1); then loop
+     read u32 len; read len bytes; split into 32-byte header + payload; decompress if
+     flags bit1; reinterpret as the half-float map (§6).
 4. Open the video (8554) with your RTSP client. After the first RTCP SR, each video frame
      has a wall-clock time on the unix_ts axis (§4). If your client exposes only RTP ts,
      apply §4.3 yourself using the SR pair.
@@ -565,8 +641,12 @@ while True:
 
 - **True rate ≠ requested rate.** `rate_hz` in the handshake is a *request* for the IMU/motion
   channel; iPhone fused device motion caps ≈100 Hz. Every channel runs at its own rate (GNSS ~1
-  Hz, heading event-driven, altitude ~1 Hz, depth ≤30 Hz). **Derive the actual rate from
-  `host_ts` deltas**, never from `rate_hz`.
+  Hz, heading on-change capped ~1 Hz, altitude ~1 Hz, depth ≤30 Hz). **Derive the actual rate
+  from `host_ts` deltas**, never from `rate_hz`.
+- **State channels are quiet by design.** A parked phone can go minutes without an intrinsics or
+  heading *change*; the snapshot + 10 s keyframes (§5.2a) are what guarantee you still hold the
+  current value. If a v2 stream's state channel produces zero rows over ≥10 s, that is a real
+  fault — flag it loudly, don't paper over it.
 - **Drops, not backpressure.** Both odometry channels are fire-and-forget with bounded buffers:
   if your socket backs up, the server *drops* records/frames for you rather than stalling
   capture or buffering unboundedly. Detect gaps with the per-channel `seq` counter. Keep your
@@ -583,5 +663,7 @@ while True:
 - **Units recap.** gyro rad/s · accel g · translation/altitude/depth meters · pressure kPa ·
   lat/lon/heading/course degrees · speed m/s · intrinsics in video pixels.
 - **Reconnecting mid-session** re-sends the handshake (with the same anchors) and, on the IMU
-  channel, replays the latest intrinsics so you're immediately calibrated.
+  channel, freshly-stamped snapshots of the state channels (§5.2a) so you're immediately
+  calibrated. On the depth channel, re-send your compression opt-in after reconnecting — codec
+  choice is per-connection.
 ```
