@@ -188,7 +188,8 @@ Not every channel *flows*. The handshake's `emission` map (v2+) classifies each 
 
 - **`continuous`** — samples at the channel's own rate while enabled (`imu`, `pose`, `depth`).
 - **`event`** — a record when the sensor reports (`gnss`, `altitude`, ~1 Hz each).
-- **`state`** — `intrinsics` and `heading` carry a *current value*, re-emitted only on
+- **`state`** — `intrinsics`, `heading`, and `format` (type 11, protocol 2.1) carry a *current
+  value*, re-emitted only on
   meaningful change. **Silence on a state channel means "unchanged", never "absent"** — and to
   make that distinction observable, state channels additionally send:
   1. **A snapshot on subscribe** — the current value, immediately after the handshake.
@@ -219,7 +220,7 @@ offset 24:
 
 | Offset | Type | Field | Notes |
 |---|---|---|---|
-| 0 | u8 | `type` | 1 imu · 2 gyro · 3 accel · 5 intrinsics · 6 gnss · 7 altitude · 8 heading · 9 pose |
+| 0 | u8 | `type` | 1 imu · 2 gyro · 3 accel · 5 intrinsics · 6 gnss · 7 altitude · 8 heading · 9 pose · 11 format |
 | 1 | u8 | `flags` | type-specific; 0 unless noted. Types 5/8: bit0 = snapshot/keyframe (§5.2a). Type 9: pose flags (§5.3). |
 | 2 | u16 | `seq` | per-channel counter, wraps; use it to detect dropped records (connect-snapshots reuse the current value — §5.2a) |
 | 4 | u32 | `reserved` | 0 |
@@ -473,6 +474,69 @@ pose-vs-image misalignment and was **measured and exonerated** (the lens hunted 
 the good and bad windows; the culprit was the un-converged gravity frame above). Lock focus only
 when your subject is beyond ~5 m *and* a constant focal length genuinely matters.
 
+**Type 11 — Camera format / rolling-shutter fingerprint** (protocol **2.1**; state channel —
+snapshot on connect + 10 s keyframes + immediate re-emit on change, §5.2a)
+
+Everything a rolling-shutter consumer needs to *key* its own readout calibration, plus the one
+quantity it cannot reconstruct itself: **which delivered-image axis the sensor's row readout runs
+along**. All values here are **priors** — calibrate readout time and PTS convention yourself and
+treat these as a keyed starting point, never ground truth.
+
+| Offset | Field | |
+|---|---|---|
+| 24 | `format_id` (u32) | stable fingerprint of the capture mode; **changes iff the format changes** — key your calibration table / detect a mid-session switch by this |
+| 28 | `width`, `height` (u16×2) | delivered pixels (what the RTP video carries) |
+| 32 | `fps` (f32) | frames/sec (from `videoMinFrameDuration`) |
+| 36 | `readout_time_s` (f32) | full-frame readout duration, seconds. **NaN = absent** (see `readout_provenance`) |
+| 40 | `camera` (u8) | 0 unknown · 1 back-wide · 2 back-ultrawide · 3 back-tele · 4 front · 5 back-LiDAR |
+| 41 | `capture_path` (u8) | 0 AVCapture · 1 ARKit |
+| 42 | `flags2` (u8) | bit0 binned · bit1 cropped |
+| 43 | `readout_direction` (u8) | 0 unknown · 1 `+Y` (top→bottom) · 2 `-Y` · 3 `+X` (left→right) · 4 `-X`. **The axis `α(row)` runs along, in delivered-image coordinates** (after the app's rotation). |
+| 44 | `pts_convention` (u8) | 0 unknown · 1 first-row-start · 2 frame-center · 3 last-row-end · 4 exposure-start |
+| 45 | `pts_provenance` (u8) | 0 unknown · 1 documented · 2 measured |
+| 46 | `readout_provenance` (u8) | 0 absent · 1 probed |
+| 47..64 | — | reserved (0) |
+
+**`readout_direction` — the field you can't compute yourself.** The sensor scans its native rows
+top→bottom; iRTSP rotates the delivered buffer to portrait (the same remap it applies to the
+intrinsics), which carries the scan axis onto a *different* delivered axis. Because the app owns
+that rotation, only the app knows the mapping — the same "on-device knowledge you can't recover
+downstream" category as `gravityTilt`. In the ARKit path (`capture_path=1`) the image is delivered
+un-rotated (sensor-native landscape), so readout is `+Y`. The direction is **derived from the
+applied rotation, not measured** — the assumption that native readout is top→bottom, and the exact
+sign, are what the gyro characterization below confirms.
+
+**`readout_time_s` is a per-format constant, not a per-frame value**, and iOS exposes *no* live API
+for it — the only source is the `quickTimeMetadataCameraFrameReadoutTime` metadata Apple embeds in a
+recorded `.mov`. When the opt-in probe (off by default) has recorded one for this exact format it
+rides here with `readout_provenance = probed`; otherwise `readout_time_s` is **NaN** and
+`readout_provenance = absent`. **Absent is a valid, non-degraded state** — it means "no prior",
+not "degraded". Never read a value without checking the provenance byte.
+
+**`pts_convention` — declared, with provenance.** This is *what instant a frame's PTS denotes*
+relative to the readout window, and it is the anchor for the row-time model
+`t(row) = t_frame + Δt + α(row)·t_r`. `pts_provenance = documented` means this is a **declared
+default from Apple's documentation / the pipeline, NOT an on-device measurement**;
+`pts_provenance = measured` means it was characterized on-device with the gyro rolling-shutter
+method. The convention may differ between `capture_path = avcapture` and `= arkit`; each path
+reports its own.
+
+> **Characterization status (2026-07-20):** `pts_convention` currently ships as
+> `first_row_start` / **`documented`** on both paths — *not yet empirically characterized on this
+> device*. It will flip to `measured` once the gyro characterization has been run and its result
+> recorded here. **Characterization method** (to be filled on execution): record fast pure-rotation
+> motion observing tags across the frame; jointly optimise camera↔IMU rotation, camera–IMU clock
+> offset, full-frame readout time, readout direction, and gyro bias against tag-corner reprojection
+> with per-row time `t_k = t_i + Δt_CI + α(y_k)·t_r`; the recovered PTS anchor and its sign are the
+> measured convention. Record here: **method · device · physical camera · resolution · fps · iOS
+> version · result** — so a future iOS behavior change is a diffable claim, not a silent drift.
+
+**A mid-session `format_id` change is a take-validity event.** iRTSP forces a single physical camera
+and disables auto lens-switching whenever odometry is up, so within a session the format is normally
+stable and this record is quiet (snapshot + keyframes only). If `format_id` *does* change mid-stream
+it is re-emitted immediately (flags 0) — treat it as "the sensor mode changed under you", not a
+routine update.
+
 ### 5.4 The handshake fields
 
 The JSON tells you, for this session: `endianness`, `record_bytes` (64), the full
@@ -482,8 +546,8 @@ The JSON tells you, for this session: `endianness`, `record_bytes` (64), the ful
 
 ```json
 {
-  "protocol": "irtsp-imu", "version": 2, "endianness": "little", "record_bytes": 64,
-  "record_types": {"imu":1,"gyro":2,"accel":3,"intrinsics":5,"gnss":6,"altitude":7,"heading":8,"pose":9},
+  "protocol": "irtsp-imu", "version": 2, "revision": 1, "endianness": "little", "record_bytes": 64,
+  "record_types": {"imu":1,"gyro":2,"accel":3,"intrinsics":5,"gnss":6,"altitude":7,"heading":8,"pose":9,"format":11},
   "gyro_units": "rad/s", "accel_units": "g",
   "body_axes": "X-right, Y-up, Z-out-of-screen", "attitude_frame": "xArbitraryZVertical",
   "clock": {"timebase":"mach_absolute_time_seconds","host_anchor":<f64>,"wall_anchor":<f64>,
@@ -493,16 +557,21 @@ The JSON tells you, for this session: `endianness`, `record_bytes` (64), the ful
                        "heading":"on-change, capped ~1 Hz (immediate if >=5 deg), + keyframes",
                        "altitude":"~1","depth":"<=30 (separate channel)"},
   "emission": {"imu":"continuous","gyro":"continuous","accel":"continuous","pose":"continuous",
-               "gnss":"event","altitude":"event","intrinsics":"state","heading":"state"},
+               "gnss":"event","altitude":"event","intrinsics":"state","heading":"state","format":"state"},
   "state_channels": {"keyframe_interval_s":10,"flags":{"bit0":"snapshot_or_keyframe"},
                      "note":"…snapshot-on-subscribe + keyframe semantics, §5.2a…"},
-  "streams": {"imu":true,"intrinsics":true,"gnss":false,"altitude":false,"heading":false,"pose":false}
+  "format_channel": {"note":"type-11 priors for rolling-shutter (§5.3)","readout_time":"…","pts_convention":"…"},
+  "streams": {"imu":true,"intrinsics":true,"gnss":false,"altitude":false,"heading":false,"pose":false,"format":true}
 }
 ```
 
-`version` bumped to **2** with the state-channel contract (`emission` + `state_channels`, §5.2a).
-A v1 server has neither key — treat its state channels as on-change-only and don't expect
-snapshots or keyframes.
+`version` is **2** with the state-channel contract (`emission` + `state_channels`, §5.2a).
+`revision` distinguishes additive point releases within a version: **`revision: 1` = protocol
+"2.1"**, which adds the type-11 camera-format channel (`format` in `record_types`/`emission`/
+`streams`, plus `format_channel`). The bump is **purely additive** — a v2.0 consumer keys off
+`version == 2`, ignores the unknown `revision`/`format` keys, and treats a type-11 record as an
+unknown record type (safe to skip). A v1 server has none of these keys — treat its state channels
+as on-change-only, with no snapshots, keyframes, or format record.
 
 ---
 
@@ -647,6 +716,11 @@ while True:
   heading *change*; the snapshot + 10 s keyframes (§5.2a) are what guarantee you still hold the
   current value. If a v2 stream's state channel produces zero rows over ≥10 s, that is a real
   fault — flag it loudly, don't paper over it.
+- **Type-11 values are priors, not ground truth** (protocol 2.1). `readout_time_s` may be absent
+  (NaN, `readout_provenance = absent`) and `pts_convention` is `documented` until characterized —
+  always read the provenance byte, and keep your own calibration authoritative. The one field to
+  trust as app-authoritative is `readout_direction` (§5.3). A mid-session `format_id` change is a
+  take-validity event, not a routine update.
 - **Drops, not backpressure.** Both odometry channels are fire-and-forget with bounded buffers:
   if your socket backs up, the server *drops* records/frames for you rather than stalling
   capture or buffering unboundedly. Detect gaps with the per-channel `seq` counter. Keep your
