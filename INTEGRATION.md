@@ -23,7 +23,7 @@ makes them fusable.
 
 | Channel | Default port | Bonjour type | Transport / format |
 |---|---|---|---|
-| **Video + audio** | `8554` | `_rtsp._tcp` | Standard **RTSP 1.0 / RTP** (RFC 2326). H.264 or HEVC video @ 90 kHz, AAC-LC audio. Optional Basic/Digest auth. |
+| **Video + audio** | `8554` | `_rtsp._tcp` | Standard **RTSP 1.0 / RTP** (RFC 2326). H.264 or HEVC video @ 90 kHz; audio in AAC-LC, HE-AAC, AAC-ELD, Opus, or L16 (uncompressed). Optional Basic/Digest auth. |
 | **IMU / odometry** | `8555` | `_irtsp-imu._tcp` | Length-prefixed JSON handshake, then a flat stream of fixed **64-byte little-endian records**. |
 | **Depth (LiDAR)** | `8556` | `_irtsp-depth._tcp` | Length-prefixed JSON handshake, then **length-prefixed depth frames** (32-byte header + half-float map). |
 
@@ -546,7 +546,7 @@ The JSON tells you, for this session: `endianness`, `record_bytes` (64), the ful
 
 ```json
 {
-  "protocol": "irtsp-imu", "version": 2, "revision": 1, "endianness": "little", "record_bytes": 64,
+  "protocol": "irtsp-imu", "version": 2, "revision": 2, "endianness": "little", "record_bytes": 64,
   "record_types": {"imu":1,"gyro":2,"accel":3,"intrinsics":5,"gnss":6,"altitude":7,"heading":8,"pose":9,"format":11},
   "gyro_units": "rad/s", "accel_units": "g",
   "body_axes": "X-right, Y-up, Z-out-of-screen", "attitude_frame": "xArbitraryZVertical",
@@ -566,12 +566,37 @@ The JSON tells you, for this session: `endianness`, `record_bytes` (64), the ful
 ```
 
 `version` is **2** with the state-channel contract (`emission` + `state_channels`, §5.2a).
-`revision` distinguishes additive point releases within a version: **`revision: 1` = protocol
-"2.1"**, which adds the type-11 camera-format channel (`format` in `record_types`/`emission`/
+`revision` distinguishes additive point releases within a version: **`revision: 2` = protocol
+"2.2"**, which adds the type-11 camera-format channel (`format` in `record_types`/`emission`/
 `streams`, plus `format_channel`). The bump is **purely additive** — a v2.0 consumer keys off
 `version == 2`, ignores the unknown `revision`/`format` keys, and treats a type-11 record as an
 unknown record type (safe to skip). A v1 server has none of these keys — treat its state channels
 as on-change-only, with no snapshots, keyframes, or format record.
+
+
+### 5.5 `capture_settings` — verifying what processing was applied (revision 2)
+
+Protocol **2.2** (`version: 2`, `revision: 2`) adds a `capture_settings` object to the odometry
+handshake reporting the capture configuration that was actually put in effect, so a consumer can
+**verify** rather than assume. Two sub-objects, `audio` and `video`.
+
+Because this channel only exists while odometry is streaming, the calibration-safe overrides are
+always in force, and the `video` block reflects that: stabilization `off`, geometric distortion
+correction `false`, video HDR `off`, global tone mapping `false`, low-light boost `false`, auto
+frame rate `false`, lens switching `locked`, face-driven AF/AE `false`, system video effects
+disabled. The remaining fields (`auto_focus_range`, `smooth_auto_focus`,
+`subject_area_monitoring`, `max_exposure_duration_s`) echo the operator's choice.
+
+The `audio` block reports `codec` (`aacLC` · `heAAC` · `aacELD` · `opus` · `l16`), `sample_rate`,
+`channels`, and — when the app has taken over the audio session — `session_mode`
+(`measurement` · `videoRecording` · `default`), `mic_mode`, `mic_data_source` and
+`mic_polar_pattern`. When it hasn't, those read `system_default`.
+
+> **Two honest caveats.** (1) This is *not* a hardware readback — a knob the device doesn't support
+> silently no-ops, so read it as "what was asked of the device". (2) **Echo cancellation and noise
+> suppression are off in every mode**: the app never instantiates a voice-processing audio unit.
+> `measurement` additionally minimizes system dynamics processing for the flattest mic response.
+
 
 ---
 
