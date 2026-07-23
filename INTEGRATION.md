@@ -54,6 +54,36 @@ The only thing you need to know for fusion is **how the RTP timestamps map to wa
 covered in §4. Video RTP clock rate is **90000 Hz**; audio RTP clock rate is the AAC sample
 rate (48000 Hz). Audio/video lip-sync uses the same RTCP mechanism as video↔odometry sync.
 
+### 2.1 Remote record trigger (optional, app 1.4+)
+
+The phone can record a take to disk — video plus the odometry sidecars — independently of
+streaming. If you are running several phones and want them to start together, you can trigger that
+over the RTSP control connection you already have open, with a `SET_PARAMETER` carrying
+`x-irtsp-record`:
+
+```
+SET_PARAMETER rtsp://<iphone-ip>:8554/live RTSP/1.0
+CSeq: <n>
+Session: <session-id>
+x-irtsp-record: on          # "on"/"start"/"1" to begin, "off"/"stop"/"0" to end
+```
+
+The response echoes the resulting state as `x-irtsp-record: on|off`. A body line of the same form
+works as well. This needs a connected client, since it rides the control connection; recording
+started from the phone's own UI does not.
+
+Ordinary players never send this, so it is invisible to them — and if you never send it, nothing
+about your integration changes. What the phone records, and in what format, stays phone-side
+configuration; the wire only starts and stops.
+
+**Why you might care:** each recorded take embeds the session's clock anchors (host + wall — the
+same model as §3), and the sensor sidecars are written in the *same byte layout as these live
+channels*: the IMU sidecar is the identical 64-byte record stream (LZFSE-compressed whole-file),
+and the depth sidecar is the identical per-frame framing with a `u32` length prefix added so it can
+be walked without a socket. So a parser you already have reads a recorded take with no new code,
+and takes captured on different phones remain mutually alignable afterward from the manifests
+alone.
+
 ---
 
 ## 3. The clock model (read this before anything else)
