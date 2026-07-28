@@ -795,4 +795,95 @@ while True:
   channel, freshly-stamped snapshots of the state channels (§5.2a) so you're immediately
   calibrated. On the depth channel, re-send your compression opt-in after reconnecting — codec
   choice is per-connection.
+
+---
+
+## 9. Recorded takes — sidecars and CSV exports
+
+A take recorded on the phone (§2.1) is a self-contained bundle:
+
 ```
+<take-id>/
+  manifest.json      clock anchors, config, durations, videoStartHost
+  video.mov          the faithful muxed take
+  imu.bin.lzfse      concatenated 64-byte IMUWire records (§5.2), LZFSE whole-file
+  depth.bin          per-frame [u32 len][32-byte header][payload]  (§6)
+  thumbnail.jpg
+```
+
+As §2.1 promised, the sidecars use the **same byte layout as the live channels** — everything in §5
+and §6 applies unchanged, and the parser you already have reads them with no new code.
+
+### 9.1 The per-sensor CSV exports
+
+The phone can also export per-sensor CSVs from a take. Columns:
+
+| Channel | Header |
+|---|---|
+| `accel` | `t,host_ts,unix_ts,ax_g,ay_g,az_g` |
+| `gyro` | `t,host_ts,unix_ts,gx_rads,gy_rads,gz_rads` |
+| `pose` | `t,host_ts,unix_ts,px_m,py_m,pz_m,qx,qy,qz,qw` |
+| `intrinsics` | `t,host_ts,unix_ts,fx,fy,ox,oy,width,height,flags` |
+
+`host_ts` / `unix_ts` are the record's own timestamps, exactly as on the wire (§3). `t` is
+**movie-relative seconds** — `host_ts − videoStartHost` from the manifest — so `t = 0` is the first
+recorded video frame and the CSV lines up with the player timeline.
+
+### 9.2 Reading the intrinsics CSV (state, not events)
+
+Intrinsics are a **state channel** (§5.2a), and the CSV inherits those semantics exactly:
+
+> **A row is the value in force _from_ its timestamp until the next row.** It is not a measurement
+> at an instant, and it says nothing about the interval before it.
+
+Hold row *i* over `[t_i, t_{i+1})`, and hold the last row to the end of the take. Two consequences
+worth stating plainly, because both look like bugs and neither is:
+
+- **The first row is essentially never at `t = 0`.** Nothing aligns an intrinsics record to the
+  first video frame. Rows appear when the value *changes* (a real zoom — sub-pixel jitter is
+  deliberately suppressed, so a change must move `fx`/`fy`/`ox`/`oy` by ≥1 px or change the
+  resolution) or when a keyframe re-asserts it every 10 s. A first row several seconds in is normal.
+- **Identical consecutive rows are not redundant.** Those are the keyframes, and they are exactly
+  what makes any slice of a take self-contained.
+
+**`flags` tells you which kind of row you are looking at** (bit0, §5.2a):
+
+| `flags` bit0 | Meaning | Safe to extrapolate backwards? |
+|---|---|---|
+| `1` | Snapshot / keyframe — the current value re-asserted, stamped at send time | **Yes.** The value was already in force before this row; carry it back to the start of the take. |
+| `0` | Change event — the value genuinely changed here, at the sensor's own timestamp | **No.** The previous value is whatever the preceding row says. |
+
+So "what were the intrinsics at the start of the take?" has a definite answer: the first row of a
+take is normally a snapshot (`flags = 1`), because one is written at record start and every 10 s
+after, and back-extrapolating a snapshot to `t = 0` is correct. Walk backwards until you hit a row
+with `flags = 0` — that one marks a real change, and you must not extrapolate across it.
+
+**Trimmed exports carry state forward.** If you export a trim range, the row that established the
+value in force may lie before that range. It is emitted anyway, as the first row, **keeping its own
+pre-range timestamps** rather than being restamped at the trim start — a fabricated timestamp on a
+state channel would be indistinguishable from a real change event. In a trimmed intrinsics CSV,
+expect the first row's `t` to be *less than* your trim's lower bound. That row is the one telling
+you which intrinsics you are looking through.
+
+### 9.3 Intrinsics resolution vs. video resolution
+
+`width` / `height` in an intrinsics record are the resolution **the intrinsics are expressed in** —
+the frames the camera actually delivered — and as of app 1.5 that is also the resolution of
+`video.mov`. The app never silently upscales: the encoder and the recording writer are both sized
+from the format capture resolved to, on the ARKit and AVCapture paths alike, and the phone's
+settings screen offers only formats the active mode can really produce. The size chosen, the size
+captured, and the size in the file are one and the same.
+
+This is worth stating because several things restrict which formats exist — ARKit pose mode, LiDAR
+depth, Multi-Cam, and 10-bit (HDR / Log) color pipelines. In app 1.4 and earlier a restricted mode
+still encoded at the *requested* size, upscaling from smaller source frames and leaving the
+intrinsics in a different pixel frame from the video — a silent scale error for anything solving
+geometry from them.
+
+**Reading older takes (app ≤1.4):** do not assume the two agree. Compare the intrinsics
+`width`/`height` with the video's dimensions and, where they differ, scale `fx`, `fy`, `ox`, `oy`
+by the ratio — all four scale linearly. The type-11 `format` record (§5.3) carries the delivered
+geometry if you would rather confirm than infer.
+
+Scaling intrinsics to the image you are actually using is the right habit either way: depth already
+requires it (§6 — scale by `depth_width / video_width`), and it is a no-op when the ratio is 1.
