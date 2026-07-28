@@ -839,10 +839,13 @@ Intrinsics are a **state channel** (§5.2a), and the CSV inherits those semantic
 Hold row *i* over `[t_i, t_{i+1})`, and hold the last row to the end of the take. Two consequences
 worth stating plainly, because both look like bugs and neither is:
 
-- **The first row is essentially never at `t = 0`.** Nothing aligns an intrinsics record to the
-  first video frame. Rows appear when the value *changes* (a real zoom — sub-pixel jitter is
-  deliberately suppressed, so a change must move `fx`/`fy`/`ox`/`oy` by ≥1 px or change the
-  resolution) or when a keyframe re-asserts it every 10 s. A first row several seconds in is normal.
+- **The first row is at `t = 0`.** The opening snapshot is stamped with the movie's own first-frame
+  timestamp, so every take carries a row establishing the value in force at its very start. (Until
+  this was anchored, the snapshot was stamped "now" and landed ~2 frames *after* t=0, because a
+  frame's timestamp is its capture time — already in the past when the frame reaches the app.)
+  After that, rows appear when the value *changes* (a real zoom — sub-pixel jitter is deliberately
+  suppressed, so a change must move `fx`/`fy`/`ox`/`oy` by ≥1 px or change the resolution) or when a
+  keyframe re-asserts it every 10 s.
 - **Identical consecutive rows are not redundant.** Those are the keyframes, and they are exactly
   what makes any slice of a take self-contained.
 
