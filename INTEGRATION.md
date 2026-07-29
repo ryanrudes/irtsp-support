@@ -613,9 +613,32 @@ handshake reporting the capture configuration that was actually put in effect, s
 Because this channel only exists while odometry is streaming, the calibration-safe overrides are
 always in force, and the `video` block reflects that: stabilization `off`, geometric distortion
 correction `false`, video HDR `off`, global tone mapping `false`, low-light boost `false`, auto
-frame rate `false`, lens switching `locked`, face-driven AF/AE `false`, system video effects
-disabled. The remaining fields (`auto_focus_range`, `smooth_auto_focus`,
-`subject_area_monitoring`, `max_exposure_duration_s`) echo the operator's choice.
+frame rate `false`, lens switching `locked`, face-driven AF/AE `false`.
+
+**Which fields mean anything depends on the capture path** (`capture_path` on the type-11 format
+record: `0` AVCapture, `1` ARKit). In **ARKit pose mode ARKit owns the camera and the app's
+`AVCaptureSession` never runs**, so none of the per-device knobs are applied. The values above stay
+correct either way — ARKit delivers an unstabilized, undistorted, SDR frame from a single camera at
+a fixed rate — but four fields that echo the operator's choice would otherwise report settings the
+capture never used, so on the ARKit path they report the truth instead:
+
+| Field | AVCapture path | ARKit path |
+|---|---|---|
+| `auto_focus_range` | `none` · `near` · `far` | `not_applied` |
+| `smooth_auto_focus` | operator's choice | `false` |
+| `subject_area_monitoring` | operator's choice | `false` |
+| `max_exposure_duration_s` | operator's cap, `0` = device default | `0` |
+| `system_video_effects_disabled` | `true` | `false` |
+| `arkit_autofocus` | `n/a` | `on` · `off` |
+
+`arkit_autofocus` reports `ARWorldTrackingConfiguration.isAutoFocusEnabled` — the **only** focus
+control that applies in pose mode, and therefore the one that decides whether focal length is
+constant across the take. `off` pins the lens (ARKit focuses far, so anything nearer than ~5 m goes
+soft); `on` — the default — lets it hunt, which breathes the focal length. If you are fitting
+intrinsics, this is the field to check.
+
+*Additive:* `version`/`revision` are unchanged. Consumers that ignore unknown keys are unaffected,
+and the four re-reported fields only change value on a path where their old value was wrong.
 
 The `audio` block reports `codec` (`aacLC` · `heAAC` · `aacELD` · `opus` · `l16`), `sample_rate`,
 `channels`, and — when the app has taken over the audio session — `session_mode`
