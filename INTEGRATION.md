@@ -585,20 +585,22 @@ The JSON tells you, for this session: `endianness`, `record_bytes` (64), the ful
 
 ```json
 {
-  "protocol": "irtsp-imu", "version": 2, "revision": 2, "endianness": "little", "record_bytes": 64,
+  "protocol": "irtsp-imu", "version": 2, "revision": 3, "endianness": "little", "record_bytes": 64,
   "record_types": {"imu":1,"gyro":2,"accel":3,"intrinsics":5,"gnss":6,"altitude":7,"heading":8,"pose":9,"format":11},
   "gyro_units": "rad/s", "accel_units": "g",
+  "intrinsics_units": "…one record per video frame; host_ts IS that frame's PTS; focus telemetry @48/@52/@53…",
   "body_axes": "X-right, Y-up, Z-out-of-screen", "attitude_frame": "xArbitraryZVertical",
   "clock": {"timebase":"mach_absolute_time_seconds","host_anchor":<f64>,"wall_anchor":<f64>,
             "rtcp_sync":"unix_ts matches RTP RTCP SR NTP timeline"},
   "video": {"rtsp_url":"rtsp://…:8554/live","clock_rate":90000,"codec":"H264"},
   "channel_rates_hz": {"imu":"<=100","gnss":"~1",
+                       "intrinsics":"= video frame rate (one record per frame)",
                        "heading":"on-change, capped ~1 Hz (immediate if >=5 deg), + keyframes",
                        "altitude":"~1","depth":"<=30 (separate channel)"},
   "emission": {"imu":"continuous","gyro":"continuous","accel":"continuous","pose":"continuous",
                "gnss":"event","altitude":"event","intrinsics":"continuous","heading":"state","format":"state"},
   "state_channels": {"keyframe_interval_s":10,"flags":{"bit0":"snapshot_or_keyframe"},
-                     "note":"…snapshot-on-subscribe + keyframe semantics, §5.2a…"},
+                     "note":"heading (8) and format (11) ONLY — …snapshot-on-subscribe + keyframe semantics, §5.2a…"},
   "format_channel": {"note":"type-11 priors for rolling-shutter (§5.3)","readout_time":"…","pts_convention":"…"},
   "streams": {"imu":true,"intrinsics":true,"gnss":false,"altitude":false,"heading":false,"pose":false,"format":true}
 }
@@ -862,6 +864,11 @@ A take recorded on the phone (§2.1) is a self-contained bundle:
 
 As §2.1 promised, the sidecars use the **same byte layout as the live channels** — everything in §5
 and §6 applies unchanged, and the parser you already have reads them with no new code.
+
+If you are handed several takes at once, they arrive as one `takes_export.zip` with a folder per
+take, each holding exactly the files above for that take. Folder names come from the take's title and
+fall back to its bundle id when two selected takes share a title, so treat the folder name as a label
+and the manifest's `id` as the key. A one-take export has no wrapping folder.
 
 ### 9.1 The per-sensor CSV exports
 
