@@ -201,9 +201,10 @@ drift (single anchor, single monotonic host clock underneath).
 ```
 On connect (server → client):
   [u32 LE handshake_len][handshake_len bytes of UTF-8 JSON]
-  then a freshly-stamped snapshot of each state channel that has a value (one type-5
-  intrinsics record, one type-8 heading record) so a late joiner is calibrated immediately
-  (§5.2a)
+  then a freshly-stamped snapshot of each state channel that has a value (one type-8
+  heading record, one type-11 format record) so a late joiner is current immediately (§5.2a).
+  Intrinsics are NOT in this snapshot: from revision 3 type 5 is a continuous per-frame
+  channel, so a late joiner has the matrix within one frame anyway (§9.2)
 
 Then, forever:
   a back-to-back stream of fixed 64-byte records. No per-record length. Parser is literally:
@@ -216,9 +217,10 @@ Everything is **little-endian**; floats/doubles are IEEE-754.
 
 Not every channel *flows*. The handshake's `emission` map (v2+) classifies each stream:
 
-- **`continuous`** — samples at the channel's own rate while enabled (`imu`, `pose`, `depth`).
+- **`continuous`** — samples at the channel's own rate while enabled (`imu`, `pose`, `depth`, and
+  `intrinsics`, which emits **one record per video frame**; see §9.2).
 - **`event`** — a record when the sensor reports (`gnss`, `altitude`, ~1 Hz each).
-- **`state`** — `intrinsics`, `heading`, and `format` (type 11, protocol 2.1) carry a *current
+- **`state`** — `heading` and `format` (type 11, protocol 2.1) carry a *current
   value*, re-emitted only on
   meaningful change. **Silence on a state channel means "unchanged", never "absent"** — and to
   make that distinction observable, state channels additionally send:
@@ -251,7 +253,7 @@ offset 24:
 | Offset | Type | Field | Notes |
 |---|---|---|---|
 | 0 | u8 | `type` | 1 imu · 2 gyro · 3 accel · 5 intrinsics · 6 gnss · 7 altitude · 8 heading · 9 pose · 11 format |
-| 1 | u8 | `flags` | type-specific; 0 unless noted. Types 5/8: bit0 = snapshot/keyframe (§5.2a). Type 9: pose flags (§5.3). |
+| 1 | u8 | `flags` | type-specific; 0 unless noted. Types 8/11: bit0 = snapshot/keyframe (§5.2a). Type 9: pose flags (§5.3). Type 5: always 0 since revision 3. |
 | 2 | u16 | `seq` | per-channel counter, wraps; use it to detect dropped records (connect-snapshots reuse the current value — §5.2a) |
 | 4 | u32 | `reserved` | 0 |
 | 8 | f64 | `host_ts` | host-clock seconds (see §3) |
@@ -281,12 +283,19 @@ absolute yaw. **Rate: fused device motion caps ≈100 Hz** regardless of the req
 *(Types 2 `gyro` and 3 `accel` carry the same slots but for the raw, unfused single-sensor mode;
 in the default fused mode you receive type 1 only.)*
 
-**Type 5 — Camera intrinsics** (pinhole; state channel — on change + snapshot + 10 s keyframes, §5.2a)
+**Type 5 — Camera intrinsics** (pinhole; **continuous — one record per video frame**, §5.2a)
 
 | Offset | Field | |
 |---|---|---|
 | 24 | `fx`, `fy`, `ox` (f32×3) | focal lengths + principal-point x, in **video pixels** |
 | 36 | `oy`, `width`, `height` (f32×3) | principal-point y + intrinsics reference resolution |
+| 48 | `lens_position` (f32) | focus position 0…1; **NaN = unknown** (revision 3) |
+| 52 | `focus_mode` (u8) | `0` locked · `1` autoFocus · `2` continuousAutoFocus · `0xFF` unknown |
+| 53 | `adjusting_focus` (u8) | `1` lens hunting · `0` settled · `0xFF` unknown |
+
+`host_ts` **is the video frame's presentation timestamp**, so a record joins to a frame by equality.
+`flags` (@1) is always `0` — this channel has no snapshots or keyframes. Focus fields are unknown on
+the ARKit path (`capture_path = 1`), which has no focus signal to report.
 
 No lens-distortion model (rectilinear/pinhole assumed). The matrix is for the **video**
 resolution; for depth, scale by `depth_width / video_width` (see §6).
@@ -587,7 +596,7 @@ The JSON tells you, for this session: `endianness`, `record_bytes` (64), the ful
                        "heading":"on-change, capped ~1 Hz (immediate if >=5 deg), + keyframes",
                        "altitude":"~1","depth":"<=30 (separate channel)"},
   "emission": {"imu":"continuous","gyro":"continuous","accel":"continuous","pose":"continuous",
-               "gnss":"event","altitude":"event","intrinsics":"state","heading":"state","format":"state"},
+               "gnss":"event","altitude":"event","intrinsics":"continuous","heading":"state","format":"state"},
   "state_channels": {"keyframe_interval_s":10,"flags":{"bit0":"snapshot_or_keyframe"},
                      "note":"…snapshot-on-subscribe + keyframe semantics, §5.2a…"},
   "format_channel": {"note":"type-11 priors for rolling-shutter (§5.3)","readout_time":"…","pts_convention":"…"},
@@ -596,12 +605,28 @@ The JSON tells you, for this session: `endianness`, `record_bytes` (64), the ful
 ```
 
 `version` is **2** with the state-channel contract (`emission` + `state_channels`, §5.2a).
-`revision` distinguishes additive point releases within a version: **`revision: 2` = protocol
-"2.2"**, which adds the type-11 camera-format channel (`format` in `record_types`/`emission`/
-`streams`, plus `format_channel`). The bump is **purely additive** — a v2.0 consumer keys off
-`version == 2`, ignores the unknown `revision`/`format` keys, and treats a type-11 record as an
-unknown record type (safe to skip). A v1 server has none of these keys — treat its state channels
-as on-change-only, with no snapshots, keyframes, or format record.
+`revision` distinguishes point releases within a version. **`revision: 2` = protocol "2.2"** added
+the type-11 camera-format channel (`format` in `record_types`/`emission`/`streams`, plus
+`format_channel`) and was purely additive.
+
+**`revision: 3` reclassifies intrinsics (type 5) from a state channel to a continuous per-frame
+channel** — see §9.2 for the full rationale, and `intrinsics_units` in the handshake for the layout.
+Unlike revision 2 this is **not purely additive**: snapshots, keyframes and `flags` bit0 are *removed*
+from type 5, and the CSV's `flags` column is gone. `version` stays **2** because the degradation is
+graceful rather than breaking — a v2.0 consumer implementing the old interval-hold rule (§9.2) still
+computes correct values at 16.7 ms granularity, since per-frame rows are a strict refinement of it,
+and it never sees `flags = 1` so it never back-extrapolates. The only loss is at the very head of
+the stream, which per-frame emission makes at most one frame wide.
+
+Also added in revision 3: focus telemetry at @48/@52/@53 on type 5, and `intrinsics` in
+`channel_rates_hz`.
+
+> **Producer skew.** The Android producer is still at revision 2 semantics for type 5 (thresholded,
+> with snapshots and keyframes). Branch on `revision` if you consume both, and do not assume the two
+> producers agree on this channel until Android reports `revision: 3`.
+
+A v1 server has none of these keys — treat its state channels as on-change-only, with no snapshots,
+keyframes, or format record.
 
 
 ### 5.5 `capture_settings` — verifying what processing was applied (revision 2)
@@ -790,10 +815,11 @@ while True:
   channel; iPhone fused device motion caps ≈100 Hz. Every channel runs at its own rate (GNSS ~1
   Hz, heading on-change capped ~1 Hz, altitude ~1 Hz, depth ≤30 Hz). **Derive the actual rate
   from `host_ts` deltas**, never from `rate_hz`.
-- **State channels are quiet by design.** A parked phone can go minutes without an intrinsics or
-  heading *change*; the snapshot + 10 s keyframes (§5.2a) are what guarantee you still hold the
-  current value. If a v2 stream's state channel produces zero rows over ≥10 s, that is a real
-  fault — flag it loudly, don't paper over it.
+- **State channels are quiet by design.** A parked phone can go minutes without a heading or format
+  *change*; the snapshot + 10 s keyframes (§5.2a) are what guarantee you still hold the current
+  value. If a v2 stream's state channel produces zero rows over ≥10 s, that is a real fault — flag
+  it loudly, don't paper over it. **This no longer applies to intrinsics**: from revision 3 it is
+  continuous, so silence there means frames have stopped arriving, which is a much louder fault.
 - **Type-11 values are priors, not ground truth** (protocol 2.1). `readout_time_s` may be absent
   (NaN, `readout_provenance = absent`) and `pts_convention` is `documented` until characterized —
   always read the provenance byte, and keep your own calibration authoritative. The one field to
@@ -846,50 +872,44 @@ The phone can also export per-sensor CSVs from a take. Columns:
 | `accel` | `t,host_ts,unix_ts,ax_g,ay_g,az_g` |
 | `gyro` | `t,host_ts,unix_ts,gx_rads,gy_rads,gz_rads` |
 | `pose` | `t,host_ts,unix_ts,px_m,py_m,pz_m,qx,qy,qz,qw` |
-| `intrinsics` | `t,host_ts,unix_ts,fx,fy,ox,oy,width,height,flags` |
+| `intrinsics` | `t,host_ts,unix_ts,fx,fy,ox,oy,width,height,lens_position,focus_mode,adjusting_focus` |
 
 `host_ts` / `unix_ts` are the record's own timestamps, exactly as on the wire (§3). `t` is
 **movie-relative seconds** — `host_ts − videoStartHost` from the manifest — so `t = 0` is the first
 recorded video frame and the CSV lines up with the player timeline.
 
-### 9.2 Reading the intrinsics CSV (state, not events)
+### 9.2 Reading the intrinsics CSV (one row per video frame)
 
-Intrinsics are a **state channel** (§5.2a), and the CSV inherits those semantics exactly:
+Intrinsics are a **continuous per-frame channel** (§5.2a), and the CSV inherits that exactly:
 
-> **A row is the value in force _from_ its timestamp until the next row.** It is not a measurement
-> at an instant, and it says nothing about the interval before it.
+> **One row per recorded video frame, and `host_ts` _is_ that frame's presentation timestamp.**
+> A row describes the frame it shares a timestamp with — nothing more, nothing less.
 
-Hold row *i* over `[t_i, t_{i+1})`, and hold the last row to the end of the take. Two consequences
-worth stating plainly, because both look like bugs and neither is:
+So the join is by equality, not by holding a value over an interval: match `host_ts` to the frame's
+PTS (or `t` to the frame's movie-relative time, within half a frame period for float safety). There
+is nothing to back-extrapolate and nothing to carry forward.
 
-- **The first row is at `t = 0`.** The opening snapshot is stamped with the movie's own first-frame
-  timestamp, so every take carries a row establishing the value in force at its very start. (Until
-  this was anchored, the snapshot was stamped "now" and landed ~2 frames *after* t=0, because a
-  frame's timestamp is its capture time — already in the past when the frame reaches the app.)
-  After that, rows appear when the value *changes* (a real zoom — sub-pixel jitter is deliberately
-  suppressed, so a change must move `fx`/`fy`/`ox`/`oy` by ≥1 px or change the resolution) or when a
-  keyframe re-asserts it every 10 s.
-- **Identical consecutive rows are not redundant.** Those are the keyframes, and they are exactly
-  what makes any slice of a take self-contained.
+**Consecutive rows are usually near-identical, and that is correct.** The matrix genuinely moves
+every frame: optical image stabilisation shifts the principal point continuously, and focus changes
+the focal length. Expect `ox`/`oy` to jitter on a handheld take, and `fx`/`fy` to move when the lens
+refocuses. If you want a change threshold, apply your own — you know your error budget.
 
-**`flags` tells you which kind of row you are looking at** (bit0, §5.2a):
+**Focus telemetry tells you _why_ `fx` moved.** `lens_position` (0…1), `focus_mode`
+(`0` locked, `1` autoFocus, `2` continuousAutoFocus, `0xFF` unknown) and `adjusting_focus`
+(`1` hunting, `0` settled, `0xFF` unknown). These are sampled asynchronously to the frame, so treat
+them as the **last reported** lens state rather than the state at exactly this PTS. On the ARKit path
+all three are unknown — ARKit exposes no focus signal at all, and the only focus fact pose mode has
+is `capture_settings.video.arkit_autofocus` in the handshake.
 
-| `flags` bit0 | Meaning | Safe to extrapolate backwards? |
-|---|---|---|
-| `1` | Snapshot / keyframe — the current value re-asserted, stamped at send time | **Yes.** The value was already in force before this row; carry it back to the start of the take. |
-| `0` | Change event — the value genuinely changed here, at the sensor's own timestamp | **No.** The previous value is whatever the preceding row says. |
-
-So "what were the intrinsics at the start of the take?" has a definite answer: the first row of a
-take is normally a snapshot (`flags = 1`), because one is written at record start and every 10 s
-after, and back-extrapolating a snapshot to `t = 0` is correct. Walk backwards until you hit a row
-with `flags = 0` — that one marks a real change, and you must not extrapolate across it.
-
-**Trimmed exports carry state forward.** If you export a trim range, the row that established the
-value in force may lie before that range. It is emitted anyway, as the first row, **keeping its own
-pre-range timestamps** rather than being restamped at the trim start — a fabricated timestamp on a
-state channel would be indistinguishable from a real change event. In a trimmed intrinsics CSV,
-expect the first row's `t` to be *less than* your trim's lower bound. That row is the one telling
-you which intrinsics you are looking through.
+> **Changed in revision 3.** This channel used to be a state channel: emitted only when the matrix
+> moved more than a pixel, with snapshots and 10 s keyframes, a `flags` column, and carry-forward on
+> trimmed exports. All of that is gone. The old design quantised a continuous signal into apparent
+> discrete "events" — and because its comparison baseline was the last *emitted* value, a slow drift
+> produced a scattering of rows that read like several separate changes. It also stamped records with
+> "now" instead of the frame's PTS, which is why a row could never be attributed to a specific frame.
+> If you implemented the old interval-hold rule, it still yields correct answers at 16.7 ms
+> granularity — per-frame rows are a strict refinement of it — but it is no longer the intended read,
+> and the `flags` column no longer exists.
 
 ### 9.3 Intrinsics resolution vs. video resolution
 
