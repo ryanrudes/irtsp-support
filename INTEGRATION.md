@@ -552,6 +552,16 @@ rides here with `readout_provenance = probed`; otherwise `readout_time_s` is **N
 `readout_provenance = absent`. **Absent is a valid, non-degraded state** — it means "no prior",
 not "degraded". Never read a value without checking the provenance byte.
 
+> **Expect absent on current hardware.** `AVMetadataIdentifierQuickTimeMetadataCameraFrameReadoutTime`
+> is an iOS 8-era key that recent iPhones appear to have stopped writing. Measured on an iPhone 17 Pro
+> running iOS 26.4: the key is absent from a probe recording *and* from the stock Camera app's own
+> movies, while the same files do carry the iOS 26 camera keys (`camera.lens_model`,
+> `camera.focal_length.35mm_equivalent`, `camera.lens_irisfnumber`). So on hardware of that
+> generation `readout_provenance = absent` is the expected steady state, not a sign the probe is
+> misconfigured. Consumers that need `t_r` should treat it as a value they must measure or calibrate
+> themselves — the app's rolling-shutter screen can produce an upper bound from lamp banding, but a
+> point estimate needs a flicker source in the high hundreds of Hz.
+
 **`pts_convention` — declared, with provenance.** This is *what instant a frame's PTS denotes*
 relative to the readout window, and it is the anchor for the row-time model
 `t(row) = t_frame + Δt + α(row)·t_r`. `pts_provenance = documented` means this is a **declared
@@ -585,7 +595,7 @@ The JSON tells you, for this session: `endianness`, `record_bytes` (64), the ful
 
 ```json
 {
-  "protocol": "irtsp-imu", "version": 2, "revision": 3, "endianness": "little", "record_bytes": 64,
+  "protocol": "irtsp-imu", "version": 2, "revision": 5, "endianness": "little", "record_bytes": 64,
   "record_types": {"imu":1,"gyro":2,"accel":3,"intrinsics":5,"gnss":6,"altitude":7,"heading":8,"pose":9,"format":11},
   "gyro_units": "rad/s", "accel_units": "g",
   "intrinsics_units": "…one record per video frame; host_ts IS that frame's PTS; focus telemetry @48/@52/@53…",
@@ -602,7 +612,8 @@ The JSON tells you, for this session: `endianness`, `record_bytes` (64), the ful
   "state_channels": {"keyframe_interval_s":10,"flags":{"bit0":"snapshot_or_keyframe"},
                      "note":"heading (8) and format (11) ONLY — …snapshot-on-subscribe + keyframe semantics, §5.2a…"},
   "format_channel": {"note":"type-11 priors for rolling-shutter (§5.3)","readout_time":"…","pts_convention":"…"},
-  "streams": {"imu":true,"intrinsics":true,"gnss":false,"altitude":false,"heading":false,"pose":false,"format":true}
+  "streams": {"imu":true,"gyro":false,"accel":false,"intrinsics":true,
+              "gnss":false,"altitude":false,"heading":false,"pose":false,"format":true}
 }
 ```
 
@@ -623,9 +634,19 @@ the stream, which per-frame emission makes at most one frame wide.
 Also added in revision 3: focus telemetry at @48/@52/@53 on type 5, and `intrinsics` in
 `channel_rates_hz`.
 
+**`revision: 4` adds the age of each focus field** — `i16` signed milliseconds at @54/@56/@58, in
+bytes that were reserved. Purely additive: nothing moved, and a revision-3 consumer that ignores them
+is unaffected. See §9.2 for why there are three of them.
+
 > **Producer skew.** The Android producer is still at revision 2 semantics for type 5 (thresholded,
 > with snapshots and keyframes). Branch on `revision` if you consume both, and do not assume the two
 > producers agree on this channel until Android reports `revision: 3`.
+
+**`streams` now describes the motion sensors too.** `imu` is the fused stream (type 1) and is true
+only when fused mode is selected *and* motion is switched on; `gyro` / `accel` are the split raw
+streams (types 2/3) and are true only in raw mode. All three can be false while the channel is up —
+a session can carry intrinsics, pose or heading with no motion records at all. Do not infer "the
+odometry channel is on" from `imu`; read the channel's presence from the handshake itself.
 
 A v1 server has none of these keys — treat its state channels as on-change-only, with no snapshots,
 keyframes, or format record.
@@ -879,22 +900,91 @@ The phone can also export per-sensor CSVs from a take. Columns:
 | `accel` | `t,host_ts,unix_ts,ax_g,ay_g,az_g` |
 | `gyro` | `t,host_ts,unix_ts,gx_rads,gy_rads,gz_rads` |
 | `pose` | `t,host_ts,unix_ts,px_m,py_m,pz_m,qx,qy,qz,qw` |
-| `intrinsics` | `t,host_ts,unix_ts,fx,fy,ox,oy,width,height,lens_position,focus_mode,adjusting_focus` |
+| `intrinsics` | `frame,t,host_ts,unix_ts,fx,fy,ox,oy,width,height,lens_position,focus_mode,adjusting_focus,lens_age,focus_mode_age,adjusting_age,exposure_duration,exposure_age,readout_time,readout_direction` |
 
-`host_ts` / `unix_ts` are the record's own timestamps, exactly as on the wire (§3). `t` is
-**movie-relative seconds** — `host_ts − videoStartHost` from the manifest — so `t = 0` is the first
-recorded video frame and the CSV lines up with the player timeline.
+`host_ts` / `unix_ts` are the record's own timestamps, exactly as on the wire (§3). For the trace
+channels `t` is **movie-relative seconds** — `host_ts − videoStartHost` from the manifest — so
+`t = 0` is the first recorded video frame and the CSV lines up with the player timeline.
 
-### 9.2 Reading the intrinsics CSV (one row per video frame)
+**`intrinsics.csv` is different in kind, and the difference is the useful part.** Its rows are not
+records; they are **frames of the video you just exported**, one each, in order:
 
-Intrinsics are a **continuous per-frame channel** (§5.2a), and the CSV inherits that exactly:
+> **Exactly one row per frame in the exported video.** `frame` runs `0, 1, 2, … N−1` with no gaps
+> and no repeats, and row *i* describes exported frame *i*. `t` is that frame's time **in the
+> exported clip**, so a trimmed export starts at `t = 0`.
 
-> **One row per recorded video frame, and `host_ts` _is_ that frame's presentation timestamp.**
-> A row describes the frame it shares a timestamp with — nothing more, nothing less.
+That makes the file joinable by row index — `intrinsics[i]` is the matrix for frame `i`, full stop —
+without matching timestamps at all. `host_ts` / `unix_ts` are still there, unchanged from the wire,
+for aligning against other devices.
 
-So the join is by equality, not by holding a value over an interval: match `host_ts` to the frame's
-PTS (or `t` to the frame's movie-relative time, within half a frame period for float safety). There
-is nothing to back-extrapolate and nothing to carry forward.
+**Use `host_ts`, not `t`, for anything about *when* a frame was exposed.** They are different kinds of
+number and only one is a measurement:
+
+* `host_ts` is the frame's capture timestamp, straight from the sensor — irregular, because the
+  hardware is. A measured 60 fps take stepped by 16.673 ms rather than the nominal 16.667, with
+  tens of nanoseconds of variation between consecutive steps: a true rate of 59.977 Hz.
+* `t` is where the frame sits in the **exported movie's** timeline, read from that file's sample
+  table. It lands on a regular 1/fps grid, because a movie's timeline is regular. It is a playback
+  coordinate — right for scrubbing a player and for a trimmed clip that starts at zero, wrong for
+  timing analysis.
+
+Neither is interpolated or invented: `t` is genuinely the movie's own presentation time, not
+`index ÷ fps`. But the movie's timeline having been normalised to a grid is exactly why it cannot
+answer questions about the sensor.
+
+**A short step in `t` is not a dropped frame.** A `.mov` timeline is an integer tick count — usually
+timescale 600, where a nominal 60 fps frame is exactly 10 ticks. A real sensor does not run at
+exactly 60 Hz, so each frame's true interval is a fraction of a tick off, and the container absorbs
+the accumulated error by occasionally emitting a step one tick short. Measured on a 5399-frame take:
+`host_ts` averaged 16.665602 ms (a true 60.0038 Hz) = 9.9993609 ticks, a deficit of 0.00064 ticks per
+frame, which reaches a whole tick every ~1565 frames — so the file contained exactly **three** steps
+of 0.015 s (9 ticks) among 5395 of 0.016666… (10 ticks), against 3.45 predicted. At each of those
+points `host_ts` stepped completely normally.
+
+So: irregularities in `t` describe the container, and `frame_gaps.csv` is the only thing that reports
+lost frames. Deriving a frame rate from `t` returns the nominal rate by construction; derive it from
+`host_ts`.
+
+If a frame's record is missing, the row is still there, carrying its `frame` and `t` with the
+measurement columns **empty**. A row is never filled in by carrying the previous frame's matrix
+forward: a held value that looks like a measured one is worse than a blank. (This is rare — it means
+a frame arrived with no intrinsic-matrix attachment. The app counts and logs it.)
+
+### 9.1a `frame_gaps.csv` — the frames that didn't make it
+
+Exported alongside `intrinsics.csv`, always, because the one-to-one guarantee above is only half the
+story: some frames the phone *captured* are not in the exported video, and their measurements would
+otherwise vanish without trace.
+
+```
+after_frame,dropped,t_first,t_last,host_ts_first,host_ts_last
+41,2,1.9812,1.9979,42145.2011,42145.2178
+```
+
+Read as: **two captured frames were lost immediately after exported frame 41**. `after_frame` is an
+index into the *exported* video (the same numbering as `intrinsics.csv`), and `-1` means the run
+precedes the first exported frame. Runs are collapsed, so one row is one gap. An empty file — header
+only — means every captured frame in the exported range made it, which is the common case for a
+lightly-loaded configuration.
+
+Why frames go missing at all: a record is emitted at **capture**, off the same sample buffer as the
+pixels; a frame in the movie is one that then survived **encode and write**. Between those points a
+frame can be refused by the encoder when it is saturated (deliberately — the alternative pushes
+backpressure into capture and costs every channel, not just video), refused by a writer that isn't
+ready, or dropped at the head because a passthrough track must open on a keyframe. Records outside
+the trim range are *not* listed here: those weren't dropped, they were cut.
+
+### 9.2 Reading the intrinsics data
+
+Intrinsics are a **continuous per-frame channel** (§5.2a): on the wire, one record per video frame,
+with `host_ts` equal to that frame's presentation timestamp, so the join is by equality rather than
+by holding a value over an interval. Nothing to back-extrapolate, nothing to carry forward.
+
+The exported `intrinsics.csv` goes one step further and does the join for you — one row per
+*exported* frame, indexed by `frame` (§9.1). If you are reading the **raw sidecar** rather than the
+CSV, you are on the wire contract: match `host_ts` to the frame's PTS (or `t` to movie-relative
+time, within half a frame period for float safety), and expect a few more records than the movie has
+frames, for the reasons in §9.1a.
 
 **Consecutive rows are usually near-identical, and that is correct.** The matrix genuinely moves
 every frame: optical image stabilisation shifts the principal point continuously, and focus changes
@@ -903,10 +993,40 @@ refocuses. If you want a change threshold, apply your own — you know your erro
 
 **Focus telemetry tells you _why_ `fx` moved.** `lens_position` (0…1), `focus_mode`
 (`0` locked, `1` autoFocus, `2` continuousAutoFocus, `0xFF` unknown) and `adjusting_focus`
-(`1` hunting, `0` settled, `0xFF` unknown). These are sampled asynchronously to the frame, so treat
-them as the **last reported** lens state rather than the state at exactly this PTS. On the ARKit path
-all three are unknown — ARKit exposes no focus signal at all, and the only focus fact pose mode has
-is `capture_settings.video.arkit_autofocus` in the handshake.
+(`1` hunting, `0` settled, `0xFF` unknown). On the ARKit path all three are unknown — ARKit exposes
+no focus signal at all, and the only focus fact pose mode has is
+`capture_settings.video.arkit_autofocus` in the handshake.
+
+**These three are joined to the frame by recency, not by identity — and revision 4 says how loosely.**
+`fx`/`fy`/`ox`/`oy` come from an attachment on the frame's own sample buffer: same object, same
+instant, exact. The focus fields do not. They are `AVCaptureDevice` properties watched by KVO, which
+fires on the device's own schedule, so the record carries whatever was last reported. Revision 4 adds
+the staleness so you can decide whether to trust a given row:
+
+| Field | Offset | Meaning |
+|---|---|---|
+| `lens_age_ms` | i16 @54 | ms from the `lensPosition` report to **this frame's** exposure |
+| `focus_mode_age_ms` | i16 @56 | same, for `focusMode` |
+| `adjusting_age_ms` | i16 @58 | same, for `isAdjustingFocus` |
+
+**Always `>= 0`.** Each field carries the newest report **at or before that frame's exposure**, never
+a later one. A frame's PTS is its capture instant but it does not reach the app until ~2 frame
+intervals later, so a report can easily be newer than the frame and older than the record — stamping
+it on would attribute a lens state to an exposure that never had it (a hunt starting 3 ms after frame
+N would mark frame N as hunting). `-32768` means there was no reading at or before this frame, which
+reads as unknown rather than borrowing a later one. Values saturate rather than wrap.
+
+**Three ages, not one**, because the three properties have three independent KVO observers:
+`focusMode` changes rarely, `lensPosition` moves continuously through a hunt, and `isAdjustingFocus`
+flips only at its ends. A single age would be accurate for at most one of them.
+
+The CSV's three age columns are in **seconds**, like every other time column in the file — the wire
+carries them as `i16` milliseconds only because a 64-byte record has no room for three `f32`s. "Never
+reported" is an **empty cell** there, not the wire's `-32768`.
+
+Why not read the device at frame time and make them exact? Because that is a lock-taking call on the
+60 fps capture path — the one place it must not go. The cache is the right structure; stating its age
+is the missing half.
 
 > **Changed in revision 3.** This channel used to be a state channel: emitted only when the matrix
 > moved more than a pixel, with snapshots and 10 s keyframes, a `flags` column, and carry-forward on
@@ -917,6 +1037,90 @@ is `capture_settings.video.arkit_autofocus` in the handshake.
 > If you implemented the old interval-hold rule, it still yields correct answers at 16.7 ms
 > granularity — per-frame rows are a strict refinement of it — but it is no longer the intended read,
 > and the `flags` column no longer exists.
+
+### 9.2a Placing a row's exposure in time
+
+A CMOS sensor exposes and reads **one row at a time**: two sweeps run down the frame, a reset sweep
+that starts each row's exposure and, `exposure` later, a readout sweep that ends it. Both travel at
+the same rate, so with `t_r` = `readout_time_s` (type-11 format record) and `H` = rows:
+
+```
+t_anchor          = host_ts + delta          # delta: see the warning below — NOT known to be 0
+exposure_start(k) = t_anchor + alpha(k) * t_r
+exposure_end(k)   = t_anchor + alpha(k) * t_r + exposure_duration
+exposure_mid(k)   = t_anchor + alpha(k) * t_r + exposure_duration / 2
+```
+
+and the single best "frame time" — the middle line at mid-exposure, which is what to use when
+treating the frame as one instant:
+
+```
+t_frame = t_anchor + t_r / 2 + exposure_duration / 2
+```
+
+> **`delta` is not known to be zero, and writing these formulas with `host_ts` in place of
+> `t_anchor` silently assumes it is.** `pts_convention` reports `first_row_start`, but whether that
+> names the first line's *exposure* start (`delta = 0`) or its *readout* start
+> (`delta = -exposure_duration`) is not settled — Apple's headers document neither, which is what
+> `pts_provenance = documented` is warning about. The **shape** of the model above is certain; its
+> **offset** is uncertain by about one `exposure_duration`. A pipeline that estimates a camera-IMU
+> time offset absorbs `delta` automatically and can ignore this; one that needs absolute alignment
+> cannot, and needs the anchor measured.
+
+Using `host_ts` alone (i.e. `t_anchor = host_ts`, `alpha = 0`) biases you **early** by `t_r/2 + exposure/2` — at 2160p60 plausibly 6–9 ms,
+about half a frame, and systematic rather than noise.
+
+**`alpha` runs along `readout_direction`, and the axis may be x.** The sweep is fixed to the sensor,
+but the app rotates the delivered buffer, so what the sensor reads as "rows" can arrive as *columns*.
+In **delivered-image pixel coordinates** — origin top-left, `x` right, `y` down, the same frame the
+intrinsics `ox`/`oy` are expressed in — with `W`,`H` the delivered width and height:
+
+| `readout_direction` | swept first | `alpha` at pixel (x, y) | divide by |
+|---|---|---|---|
+| `+y` | top edge | `y / (H-1)` | **H** |
+| `-y` | bottom edge | `(H-1-y) / (H-1)` | **H** |
+| `+x` | left edge | `x / (W-1)` | **W** |
+| `-x` | right edge | `(W-1-x) / (W-1)` | **W** |
+
+The trap is the last column: when the direction is `±x` the swept lines are **columns**, so the
+divisor is `W`, not `H`, and a pixel's readout time depends on its `x` and not its `y` at all.
+Concretely, this app reports `+y` when it applies no rotation, `-x` at 90 degrees, `-y` at 180 and
+`+x` at 270.
+
+**What is measured and what is assumed.** `exposure_duration` is the device's own value (sampled
+asynchronously, so `exposure_age` says how stale). `readout_time_s` is Apple's own
+`CameraFrameReadoutTime` for that capture format, present only when the readout probe is enabled —
+`readout_provenance = absent` otherwise, which is a valid state meaning nobody has probed that format.
+But **which instant `host_ts` names within the sweep is a convention, not a measurement**:
+`pts_convention` reports `first_row_start` with `pts_provenance = documented`, and Apple's headers
+document nothing about it. The residual uncertainty is on the order of one `exposure_duration`.
+Resolving it needs on-device characterisation, at which point `pts_provenance` becomes `measured` —
+never assume it already is.
+
+### 9.2b Which of these are instants, and which are durations
+
+Everything in the file is seconds, but they are not all the same kind of number, and mixing them is
+the easy mistake:
+
+| Column | Kind | Axis |
+|---|---|---|
+| `host_ts` | **instant** | the phone's monotonic host clock — the axis video PTS, IMU, pose and depth all share |
+| `unix_ts` | **instant** | wall clock, the same instant expressed on the RTCP/NTP axis |
+| `t` | **instant** | the *exported movie's* playback timeline, not a clock (§9.1) |
+| `exposure_duration`, `readout_time` | **duration** | lengths of an interval — not on any timeline |
+| `lens_age`, `focus_mode_age`, `adjusting_age`, `exposure_age` | **duration** | offsets *back from this row's* `host_ts` |
+
+So there is nothing to convert. The durations are elapsed seconds on the same clock `host_ts` is
+expressed in, which is what makes them directly composable:
+
+```
+report_instant   = host_ts - exposure_age          # when the shutter value was actually reported
+exposure_start(n)= host_ts + alpha(n) * readout_time
+t_frame          = host_ts + readout_time/2 + exposure_duration/2
+```
+
+The one that is *not* interchangeable is `t`: it is an instant, but on the container's timeline
+rather than a clock, so never mix it with the durations above. Use `host_ts`.
 
 ### 9.3 Intrinsics resolution vs. video resolution
 
