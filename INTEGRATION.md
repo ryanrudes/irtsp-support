@@ -552,15 +552,25 @@ rides here with `readout_provenance = probed`; otherwise `readout_time_s` is **N
 `readout_provenance = absent`. **Absent is a valid, non-degraded state** — it means "no prior",
 not "degraded". Never read a value without checking the provenance byte.
 
-> **Expect absent on current hardware.** `AVMetadataIdentifierQuickTimeMetadataCameraFrameReadoutTime`
-> is an iOS 8-era key that recent iPhones appear to have stopped writing. Measured on an iPhone 17 Pro
-> running iOS 26.4: the key is absent from a probe recording *and* from the stock Camera app's own
-> movies, while the same files do carry the iOS 26 camera keys (`camera.lens_model`,
-> `camera.focal_length.35mm_equivalent`, `camera.lens_irisfnumber`). So on hardware of that
-> generation `readout_provenance = absent` is the expected steady state, not a sign the probe is
-> misconfigured. Consumers that need `t_r` should treat it as a value they must measure or calibrate
-> themselves — the app's rolling-shutter screen can produce an upper bound from lamp banding, but a
-> point estimate needs a flicker source in the high hundreds of Hz.
+> **Two facts about this item that are easy to get wrong, both verified against real files.**
+>
+> 1. **It is track-level metadata on the video track, and its value is microseconds.**
+>    `AVMetadataIdentifierQuickTimeMetadataCameraFrameReadoutTime` maps to
+>    `mdta/com.apple.quicktime.camera.framereadouttimeinmicroseconds`, and the value is a bare
+>    integer — an iPhone 4S clip carries `28512`, i.e. 28.5 ms. It is **not** a `CMTime` and **not**
+>    seconds. It also does not appear in the movie header, so `AVAsset.metadata` alone will not find
+>    it; you must read the video track's own `metadata`.
+> 2. **Recent iPhones appear to have stopped writing it.** Surveyed across stock Camera recordings:
+>    present on iPhone 4S / iOS 6.1.3 (28512 µs); absent on iPhone 12 / iOS 17.6.1 and on
+>    iPhone 17 Pro / iOS 26.1–27.0. Absent from a third-party `AVCaptureMovieFileOutput` recording on
+>    the 17 Pro too, so it is not a matter of capture configuration. Those same modern files do carry
+>    the iOS 26 camera keys (`camera.lens_model`, `camera.focal_length.35mm_equivalent`,
+>    `camera.lens_irisfnumber`), so the metadata track is alive — this key specifically is not.
+>
+> On hardware of that generation `readout_provenance = absent` is the expected steady state, not a
+> sign the probe is misconfigured. Consumers that need `t_r` there must measure or calibrate it — the
+> app's rolling-shutter screen produces an upper bound from lamp banding, but a point estimate needs
+> a flicker source in the high hundreds of Hz, or a gyro-based fit.
 
 **`pts_convention` — declared, with provenance.** This is *what instant a frame's PTS denotes*
 relative to the readout window, and it is the anchor for the row-time model
