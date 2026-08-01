@@ -1055,7 +1055,7 @@ that starts each row's exposure and, `exposure` later, a readout sweep that ends
 the same rate, so with `t_r` = `readout_time_s` (type-11 format record) and `H` = rows:
 
 ```
-t_anchor          = host_ts + delta          # delta: see the warning below — NOT known to be 0
+t_anchor          = host_ts - exposure_duration - D    # D: per-format constant, see below
 exposure_start(k) = t_anchor + alpha(k) * t_r
 exposure_end(k)   = t_anchor + alpha(k) * t_r + exposure_duration
 exposure_mid(k)   = t_anchor + alpha(k) * t_r + exposure_duration / 2
@@ -1066,19 +1066,43 @@ treating the frame as one instant:
 
 ```
 t_frame = t_anchor + t_r / 2 + exposure_duration / 2
+        = host_ts - exposure_duration / 2 + t_r / 2 - D
 ```
 
-> **`delta` is not known to be zero, and writing these formulas with `host_ts` in place of
-> `t_anchor` silently assumes it is.** `pts_convention` reports `first_row_start`, but whether that
-> names the first line's *exposure* start (`delta = 0`) or its *readout* start
-> (`delta = -exposure_duration`) is not settled — Apple's headers document neither, which is what
-> `pts_provenance = documented` is warning about. The **shape** of the model above is certain; its
-> **offset** is uncertain by about one `exposure_duration`. A pipeline that estimates a camera-IMU
-> time offset absorbs `delta` automatically and can ignore this; one that needs absolute alignment
-> cannot, and needs the anchor measured.
+> **`host_ts` marks a READ-OUT instant — measured, not assumed.** An earlier revision of this
+> section warned that `delta` was unknown and uncertain "by about one `exposure_duration`". It has
+> since been measured on an iPhone 17 Pro, and that is exactly what it turned out to be.
+>
+> The method: the residual phase of a driven LED cannot give the anchor on its own (the anchor and
+> the LED's own phase are inseparable), but it *can* give the anchor's **derivative with respect to
+> exposure**, because the LED's phase does not depend on the camera's exposure. Measured slope
+> +3191 rad/s against +πf = +3142 predicted for a read-out instant, with a per-block spread of
+> 0.009 rad and the neighbouring hypothesis a full πf away. So `dc/dE = 1`.
+>
+> **The consequence that matters: the anchor moves one-for-one with the exposure.** Under
+> auto-exposure it therefore changes *every frame*, so use the per-frame `exposure_us` from the
+> type-5 record (revision 5). A fixed per-format offset is wrong by however much the exposure moves.
+>
+> **`D` is a per-format constant and is not decomposable.** It contains whichever read instant is
+> meant — the first row leaving the sensor (`D = 0`) or the last (`D = t_r`) — plus any per-format
+> pipeline latency. An attempt to separate them by comparing formats with different `t_r` was
+> **refuted by its own data**: three format pairs could not be fitted by any single model, best
+> residual 0.520 rad against 0.02 rad of measurement noise. Formats differ by more than their
+> readout time, and once that is true `k·t_r(format)` and a per-format offset are the same function
+> of format — so no number of further comparisons can separate them. This is a limit of the
+> approach, not of the data, and it is not worth retrying.
+>
+> `D` being *constant per format* is the good case: any pipeline that estimates a camera-to-clock or
+> camera-to-IMU offset absorbs it. What such a pipeline cannot absorb is the exposure term, because
+> that varies frame to frame — and that term is now known exactly.
 
-Using `host_ts` alone (i.e. `t_anchor = host_ts`, `alpha = 0`) biases you **early** by `t_r/2 + exposure/2` — at 2160p60 plausibly 6–9 ms,
-about half a frame, and systematic rather than noise.
+**Row-to-row and frame-to-frame differences are exact**; only absolute alignment to an external
+clock needs `D`. The difference between two rows of the same frame is `(k2 - k1)/(H-1) * t_r` with
+nothing unknown in it, and two frames' rows differ by that plus the difference of their `host_ts`
+and half the difference of their exposures.
+
+Using `host_ts` alone (i.e. `t_anchor = host_ts`, `alpha = 0`) biases you by `exposure/2 - t_r/2 + D`
+— systematic rather than noise, and at 2160p60 the `t_r/2` term alone is 1.2 ms.
 
 **`alpha` runs along `readout_direction`, and the axis may be x.** The sweep is fixed to the sensor,
 but the app rotates the delivered buffer, so what the sensor reads as "rows" can arrive as *columns*.
