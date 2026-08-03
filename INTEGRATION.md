@@ -870,6 +870,15 @@ The phone can also export per-sensor CSVs from a take. Columns:
 | `pose` | `t,host_ts,unix_ts,px_m,py_m,pz_m,qx,qy,qz,qw,tracking_state,tracking_reason,flags,gravity_tilt_deg,gravity_azimuth_deg` |
 | `intrinsics` | `frame,t,host_ts,unix_ts,fx,fy,ox,oy,width,height,lens_position,focus_mode,adjusting_focus,lens_age,focus_mode_age,adjusting_age,exposure_duration,exposure_age,readout_time,readout_direction` |
 
+**The CSV spells out what the wire encodes.** `focus_mode` reads `locked` · `autoFocus` ·
+`continuousAutoFocus` · `unknown`, and `adjusting_focus` reads `hunting` · `settled` · `unknown`,
+rather than the wire's `0`/`1`/`2`/`0xFF`. Same reason `readout_direction` is `+y` and not `1`: a
+CSV is read by people and by parsers that infer a type per column, and `255` in an integer column is
+a number that silently sorts, averages and plots as 255. A value neither we nor your iOS version
+recognises reads `unknown(N)`, keeping it distinct from the sentinel that means *nobody ever
+reported* — those are opposite kinds of ignorance. The **wire is unchanged**; this is a rendering
+choice in the exporter (§5.1 has the numeric encoding).
+
 `host_ts` / `unix_ts` are the record's own timestamps, exactly as on the wire (§3). For the trace
 channels `t` is **movie-relative seconds** — `host_ts − videoStartHost` from the manifest — so
 `t = 0` is the first recorded video frame and the CSV lines up with the player timeline.
