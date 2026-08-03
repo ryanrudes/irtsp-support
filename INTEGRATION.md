@@ -468,7 +468,8 @@ treat these as a keyed starting point, never ground truth.
 | 44 | `pts_convention` (u8) | 0 unknown · 1 first-row-start · 2 frame-center · 3 last-row-end · 4 exposure-start · **5 readout-instant** (what this app ships — see below) |
 | 45 | `pts_provenance` (u8) | 0 unknown · 1 documented · 2 measured |
 | 46 | `readout_provenance` (u8) | 0 absent · 1 probed |
-| 47..64 | — | reserved (0) |
+| 47 | `direction_provenance` (u8) | **revision 6** — 0 unknown · 1 derived · 2 measured. How `readout_direction` was arrived at. |
+| 48..64 | — | reserved (0) |
 
 **`readout_direction` — the field you can't compute yourself.** The sensor scans its native rows
 top→bottom; iRTSP rotates the delivered buffer to portrait (the same remap it applies to the
@@ -477,7 +478,21 @@ that rotation, only the app knows the mapping — the same "on-device knowledge 
 downstream" category as `gravityTilt`. In the ARKit path (`capture_path=1`) the image is delivered
 un-rotated (sensor-native landscape), so readout is `+Y`. The direction is **derived from the
 applied rotation, not measured** — the assumption that native readout is top→bottom, and the exact
-sign, are what the gyro characterization below confirms.
+sign, are what the gyro characterization below confirms — **and `direction_provenance` (@47) now says
+which of those two you are looking at.**
+
+**`direction_provenance` — because a derivation and an observation are not the same claim.** Every
+other assertion on this record already carried its own provenance byte; the direction did not, which
+left the app's most-trusted field the one a consumer could say least about. `derived` (1) means the
+value was computed from the rotation the app applies, resting on the assumption that native readout
+runs top→bottom. `measured` (2) means the app's own rolling-shutter measurement observed it for
+**this** capture format, recovering direction from banding and not resting on that assumption at all.
+
+Note the deliberate asymmetry with `readout_time_s`: an unmeasured readout *time* is **absent**,
+because there is nothing honest to say. An unmeasured *direction* is still reported, because the
+derivation is genuinely informative — this byte is what stops it from reading as a measurement.
+Producers before revision 6 wrote `0` into this reserved byte, which decodes as `unknown`, so an
+older stream never claims a derivation it did not make.
 
 **`readout_time_s` is a per-format constant, not a per-frame value**, and iOS exposes *no* live API
 for it — the only source is the `quickTimeMetadataCameraFrameReadoutTime` metadata Apple embeds in a
@@ -868,7 +883,7 @@ The phone can also export per-sensor CSVs from a take. Columns:
 | `accel` | `t,host_ts,unix_ts,ax_g,ay_g,az_g` |
 | `gyro` | `t,host_ts,unix_ts,gx_rads,gy_rads,gz_rads` |
 | `pose` | `t,host_ts,unix_ts,px_m,py_m,pz_m,qx,qy,qz,qw,tracking_state,tracking_reason,flags,gravity_tilt_deg,gravity_azimuth_deg` |
-| `intrinsics` | `frame,t,host_ts,unix_ts,fx,fy,ox,oy,width,height,lens_position,focus_mode,adjusting_focus,lens_age,focus_mode_age,adjusting_age,exposure_duration,exposure_age,readout_time,readout_direction` |
+| `intrinsics` | `frame,t,host_ts,unix_ts,fx,fy,ox,oy,width,height,lens_position,focus_mode,adjusting_focus,lens_age,focus_mode_age,adjusting_age,exposure_duration,exposure_age,readout_time,readout_direction,readout_direction_provenance` |
 
 **The CSV spells out what the wire encodes.** `focus_mode` reads `locked` · `autoFocus` ·
 `continuousAutoFocus` · `unknown`, and `adjusting_focus` reads `hunting` · `settled` · `unknown`,
