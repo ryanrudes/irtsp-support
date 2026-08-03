@@ -866,7 +866,7 @@ The phone can also export per-sensor CSVs from a take. Columns:
 |---|---|
 | `accel` | `t,host_ts,unix_ts,ax_g,ay_g,az_g` |
 | `gyro` | `t,host_ts,unix_ts,gx_rads,gy_rads,gz_rads` |
-| `pose` | `t,host_ts,unix_ts,px_m,py_m,pz_m,qx,qy,qz,qw` |
+| `pose` | `t,host_ts,unix_ts,px_m,py_m,pz_m,qx,qy,qz,qw,tracking_state,tracking_reason,flags,gravity_tilt_deg,gravity_azimuth_deg` |
 | `intrinsics` | `frame,t,host_ts,unix_ts,fx,fy,ox,oy,width,height,lens_position,focus_mode,adjusting_focus,lens_age,focus_mode_age,adjusting_age,exposure_duration,exposure_age,readout_time,readout_direction` |
 
 `host_ts` / `unix_ts` are the record's own timestamps, exactly as on the wire (§3). For the trace
