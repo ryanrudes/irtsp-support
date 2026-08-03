@@ -278,7 +278,8 @@ in the default fused mode you receive type 1 only.)*
 
 `host_ts` **is the video frame's presentation timestamp**, so a record joins to a frame by equality.
 `flags` (@1) is always `0` — this channel has no snapshots or keyframes. The three *focus* fields are
-unknown on the ARKit path (`capture_path = 1`), which has no focus signal to report. `exposure_us`
+reported on the ARKit path (`capture_path = 1`) only when the shared `AVCaptureDevice` actually
+reports them under ARKit — measured working, see §9.2. `exposure_us`
 (@60) is **not** one of them: it is populated on both paths, and on ARKit it comes from
 `ARCamera.exposureDuration`, a property of the frame itself, so `exposure_age_ms` there is exactly
 `0`. Do not skip it on ARKit — §9.2 needs it every frame.
@@ -979,6 +980,26 @@ callback cannot arrive unless the property genuinely changed. So:
 
 **A blank age therefore keeps one meaning on both paths: nothing was ever reported.** It never means
 "reported, but we're unsure when". Read the ages, not the presence of the column.
+
+> **Measured (2026-08-03, iPhone 17 Pro / iOS 27, ARKit 1920×1440 @ 60, autofocus on): the shared
+> device does report.** Over a 429-frame take `lens_position` moved across 0.000–0.753 in steps of
+> exactly **1/255** — the lens driver's own 8-bit quantization — and correlated **r = −0.84** with
+> `fx`, which comes from a completely independent source (ARKit's per-frame intrinsics attachment).
+> Two unrelated signals describing the same lens movement is what makes the reading real; a stale or
+> default value cannot correlate with anything. `focus_mode` and `adjusting_focus` tracked it
+> coherently (mode `1`/hunting during the rack, mode `2`/settled after), and `adjusting_focus` was
+> unknown for exactly the **first 5 frames** — the no-seed rule visible in the data, reporting
+> nothing until something was genuinely reported.
+>
+> `lens_age` ran a median of **40 ms** with a p90 of 157 ms and a maximum of 706 ms. The long ages
+> are not a fault: they occur while the lens is *parked*, where no change means no notification, and
+> the age growing is the mechanism telling you so. Compare the AVCapture path, which seeds and so
+> starts from a fresh reading. **Do not treat a large `lens_age` as bad data — treat it as an
+> accurate statement about how long the lens has been still.**
+>
+> Note the size of the effect this exposes: `fx` swung **12.1%** (1273.8 → 1427.7) across that take.
+> Focus breathing of that magnitude is why a single take-wide intrinsic matrix is the wrong model
+> here, and why the per-frame rows exist.
 
 **These three are joined to the frame by recency, not by identity — and revision 4 says how loosely.**
 `fx`/`fy`/`ox`/`oy` come from an attachment on the frame's own sample buffer: same object, same
