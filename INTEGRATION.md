@@ -4,11 +4,6 @@ How to consume iRTSP's streams from your own software, and — the important par
 video and the odometric (IMU / GPS / pose / depth) streams are timestamped so you can fuse
 them without guessing at the temporal alignment.
 
-> **Shortcut:** the official Python client, [`irtsp`](https://github.com/ryanrudes/irtsp-python)
-> (`pip install irtsp`), implements everything on this page — typed records, the shared clock,
-> discovery, depth, and synced video bundles. Read on if you're integrating from another language
-> or want the byte-level details.
-
 Everything here is the actual wire format. Field offsets, units, and endianness are taken
 directly from `Sources/IMU/IMUWireFormat.swift`, `Sources/IMU/DepthStreamServer.swift`,
 `Sources/Motion/StreamClock.swift`, and `Sources/RTP/RTCP.swift`.
@@ -54,12 +49,12 @@ The only thing you need to know for fusion is **how the RTP timestamps map to wa
 covered in §4. Video RTP clock rate is **90000 Hz**; audio RTP clock rate is the AAC sample
 rate (48000 Hz). Audio/video lip-sync uses the same RTCP mechanism as video↔odometry sync.
 
-### 2.1 Remote record trigger (optional, app 1.4+)
+### 2.1 Remote record trigger (optional, for multi-phone sync)
 
-The phone can record a take to disk — video plus the odometry sidecars — independently of
-streaming. If you are running several phones and want them to start together, you can trigger that
-over the RTSP control connection you already have open, with a `SET_PARAMETER` carrying
-`x-irtsp-record`:
+The phone can record each take to disk (video + the odometry sidecars) independently of streaming.
+A controller can arm several phones and start/stop them together with an RTSP `SET_PARAMETER`
+carrying `x-irtsp-record`, sent on the already-open control connection (a client must be connected;
+the header or a body line both work):
 
 ```
 SET_PARAMETER rtsp://<iphone-ip>:8554/live RTSP/1.0
@@ -68,21 +63,10 @@ Session: <session-id>
 x-irtsp-record: on          # "on"/"start"/"1" to begin, "off"/"stop"/"0" to end
 ```
 
-The response echoes the resulting state as `x-irtsp-record: on|off`. A body line of the same form
-works as well. This needs a connected client, since it rides the control connection; recording
-started from the phone's own UI does not.
-
-Ordinary players never send this, so it is invisible to them — and if you never send it, nothing
-about your integration changes. What the phone records, and in what format, stays phone-side
-configuration; the wire only starts and stops.
-
-**Why you might care:** each recorded take embeds the session's clock anchors (host + wall — the
-same model as §3), and the sensor sidecars are written in the *same byte layout as these live
-channels*: the IMU sidecar is the identical 64-byte record stream (LZFSE-compressed whole-file),
-and the depth sidecar is the identical per-frame framing with a `u32` length prefix added so it can
-be walked without a socket. So a parser you already have reads a recorded take with no new code,
-and takes captured on different phones remain mutually alignable afterward from the manifests
-alone.
+The response echoes the resulting state as `x-irtsp-record: on|off`. Ordinary players never send
+this, so it is invisible to them. The recorded takes each embed the session's `StreamClock` anchors
+(host + wall), so the inter-phone start offsets are recoverable from the files afterward — the same
+clock model as §3. Recording format/mode is configured on the phone, not over the wire.
 
 ---
 
@@ -221,9 +205,8 @@ Not every channel *flows*. The handshake's `emission` map (v2+) classifies each 
   `intrinsics`, which emits **one record per video frame**; see §9.2).
 - **`event`** — a record when the sensor reports (`gnss`, `altitude`, ~1 Hz each).
 - **`state`** — `heading` and `format` (type 11, protocol 2.1) carry a *current
-  value*, re-emitted only on
-  meaningful change. **Silence on a state channel means "unchanged", never "absent"** — and to
-  make that distinction observable, state channels additionally send:
+  value*, re-emitted only on meaningful change. **Silence on a state channel means "unchanged",
+  never "absent"** — and to make that distinction observable, state channels additionally send:
   1. **A snapshot on subscribe** — the current value, immediately after the handshake.
   2. **A keyframe every `keyframe_interval_s`** (10 s) — the current value re-asserted to all
      clients, so *any* ≥10 s slice of the stream is self-contained regardless of when you
@@ -270,15 +253,15 @@ offset 24:
 | 36 | `accel.x`,`accel.y`,`accel.z` (f32×3) | **g** *on the wire*. CoreMotion `gravity + userAcceleration` (i.e. gravity is included, not removed); face-up at rest ≈ (0, 0, −1). |
 | 48 | `quat.x`,`quat.y`,`quat.z`,`quat.w` (f32×4) | attitude, unit quaternion (present only if attitude enabled) |
 
-> **Units — don't convert twice.** The **wire** carries acceleration in **g**. The `irtsp`
-> Python client already normalizes to SI and gives you `accel` in **m/s²**, keeping the raw wire
-> value as `accel_g`. Multiply by 9.80665 only if you decode the 64-byte records yourself.
+> **Units — don't convert twice.** The **wire** carries acceleration in **g**. The `irtsp-python`
+> client already normalizes to SI and hands you `accel` in **m/s²**, keeping the raw wire value as
+> `accel_g`. So: multiply by 9.80665 only if you are decoding the 64-byte records yourself.
 
 Reference frames: body axes **X-right, Y-up, Z-out-of-screen**; attitude frame is CoreMotion
-`xArbitraryZVertical` — i.e. the quaternion is **gravity-referenced** (Z vertical) with an
-**arbitrary, non-north X**. That makes it a good independent gravity witness, but it carries no
-absolute yaw. **Rate: fused device motion caps ≈100 Hz** regardless of the requested
-`rate_hz`. Always compute the true rate from `host_ts` deltas.
+`xArbitraryZVertical` — i.e. the quaternion is **gravity-referenced** (Z is vertical) with an
+**arbitrary, non-north X**. That makes it a usable independent gravity witness, but it carries no
+absolute yaw. **Rate: fused device motion caps ≈100 Hz** regardless of the requested `rate_hz`.
+Always compute the true rate from `host_ts` deltas.
 
 *(Types 2 `gyro` and 3 `accel` carry the same slots but for the raw, unfused single-sensor mode;
 in the default fused mode you receive type 1 only.)*
@@ -294,8 +277,11 @@ in the default fused mode you receive type 1 only.)*
 | 53 | `adjusting_focus` (u8) | `1` lens hunting · `0` settled · `0xFF` unknown |
 
 `host_ts` **is the video frame's presentation timestamp**, so a record joins to a frame by equality.
-`flags` (@1) is always `0` — this channel has no snapshots or keyframes. Focus fields are unknown on
-the ARKit path (`capture_path = 1`), which has no focus signal to report.
+`flags` (@1) is always `0` — this channel has no snapshots or keyframes. The three *focus* fields are
+unknown on the ARKit path (`capture_path = 1`), which has no focus signal to report. `exposure_us`
+(@60) is **not** one of them: it is populated on both paths, and on ARKit it comes from
+`ARCamera.exposureDuration`, a property of the frame itself, so `exposure_age_ms` there is exactly
+`0`. Do not skip it on ARKit — §9.2 needs it every frame.
 
 No lens-distortion model (rectilinear/pinhole assumed). The matrix is for the **video**
 resolution; for depth, scale by `depth_width / video_width` (see §6).
@@ -342,176 +328,123 @@ bit0) are stamped at send time.
 |---|---|---|
 | 24 | `tx`, `ty`, `tz` (f32×3) | meters, world translation |
 | 36 | `trackingState` (f32) | 0 = none, 1 = limited, 2 = normal |
-| 40 | `gravityTilt` (f32) | degrees between ARKit's world +Y and **true gravity** (§5.3.1) |
-| 44 | `gravityAzimuth` (f32) | degrees; which way the frame leans (§5.3.1) |
+| 40 | `gravityTilt` (f32) | **degrees between ARKit's world +Y and true gravity** (see below) |
+| 44 | `gravityAzimuth` (f32) | degrees, which way the frame leans (see below) |
 | 48 | `qx`, `qy`, `qz`, `qw` (f32×4) | unit quaternion, world orientation |
 
-Frame: **gravity-aligned world (+Y up), origin & yaw at session start**. The pose is
-`ARCamera.transform` — the **ARKit camera frame** (in sensor-native landscape: +X right,
-+Y up, +Z toward the viewer; optical axis = −Z). To use it with the type-5 intrinsics in a
-standard CV pinhole frame (+Z forward, +Y down), apply `R_cv = R_arkit · diag(1, −1, −1)`.
-`host_ts` is `ARFrame.timestamp` (same axis as the video PTS), so pose lines up with video
-frames directly — the encoded frame *is* the `ARFrame.capturedImage` the pose was derived
-from, so there is no lens, crop, or warp between them. Rate matches the AR camera's frame
-rate (30–60 Hz; measured 30 Hz on an iPhone 17 Pro). This is iRTSP's own on-device VIO
-estimate — useful as ground-truth/comparison or a prior, not a substitute for your own
-fusion if you want raw inputs.
-
-**Video stabilization is never applied** to a stream carrying odometry: in AR pose mode
-ARKit's `capturedImage` is the raw sensor frame, and on the normal capture path
-stabilization is force-disabled whenever any IMU/VIO channel is up.
-
-#### `flags` (offset 1) — the world frame moved
-
-`tracking = normal` is **not** a promise that the pose is continuous.
+The `flags` byte (offset 1) is meaningful on this record type:
 
 | Bit | Name | Meaning |
 |---|---|---|
-| 0 | `discontinuity` | **Re-anchor here; do not integrate across this sample.** Set whenever bit1, bit2 or bit3 is set, and on session interruption. |
-| 1 | `relocalized` | Tracking recovered (`limited`/`none` → `normal`); ARKit re-anchors its map at this moment. |
-| 2 | `jump` | The pose took a kinematically impossible step (>10 m/s, or >45° rotation, between consecutive frames) while tracking stayed `normal` — a silent loop closure or map merge. |
-| 3 | `reset` | **The operator reset tracking.** A brand-new world frame starts here (see below). |
-| 4 | `diverged` | **ARKit's position has provably run away. The take is not usable** (see below). |
+| 0 | `discontinuity` | **The world frame moved under you.** Re-anchor here; do not integrate across this sample. Set whenever bit1/2/3 is set, and on session interruption. |
+| 1 | `relocalized` | Tracking recovered (`limited`/`notAvailable` → `normal`). ARKit re-anchors the map at this moment. |
+| 2 | `jump` | The pose took a kinematically impossible step (>10 m/s translation, or >45° rotation, between consecutive frames) while tracking stayed `normal` — i.e. a silent loop closure or map merge. |
+| 3 | `reset` | **The operator reset tracking — a brand-new world frame starts here.** |
 
-Pose byte **4** (formerly reserved) carries ARKit's `TrackingState.Reason`, valid when
-`trackingState = 1` (limited): `0` none · `1` initializing · `2` excessiveMotion ·
-`3` insufficientFeatures · `4` relocalizing · `5` unknown-future-reason. `relocalizing` is the
-one to watch — it explains a subsequent world-frame snap-back that otherwise looks like a teleport.
+Bit 0 is the one to branch on; bits 1–3 say *why*, and the why matters. Bit 2 exists because ARKit
+corrects the world frame on loop closure **without ever leaving `normal` tracking** and without
+firing any callback — the pose itself is the only witness, so iRTSP detects those seams
+kinematically and reports them here.
 
-Branch on bit0; bits 1–3 say *why*, and the why matters. Bit 2 exists because ARKit corrects the
-world frame on loop closure **without ever leaving `normal`** and without firing any callback — the
-pose itself is the only witness, so iRTSP detects those seams kinematically. On a measured outdoor
-capture there were 11 such re-anchors (worst: 6.04 m in a single 33 ms sample), every one with
-`tracking = normal`.
+Bits 1–2 are **warnings** (the tracker papered something over). Bit 3 is the opposite: **deliberate
+and clean** — an operator saw a broken frame and fixed it. Say "a new epoch starts here", not "the
+phone teleported".
 
-Bits 1–2 are **data-quality warnings**: something went wrong and the tracker papered over it. Bit 3
-is the opposite — it is **deliberate and clean**: an operator noticed a broken frame and fixed it.
-Report them differently. "A new epoch starts here" is right for a reset; "the phone teleported" is
-not.
+**A reset is not a skippable sample.** The new frame has a new origin, new yaw and new gravity
+alignment; every earlier pose lives in a frame that no longer exists, and **no transform relates the
+two sides**. Close the epoch and re-derive every registration. A consumer that skips the flagged
+sample and keeps its existing transform will go on producing confident, wrong results.
 
-#### `diverged` (bit 4) — the take is not usable
+`host_ts` **stays continuous across a reset** — verified on-device: the step across one is exactly
+one frame interval (`ARFrame.timestamp` runs off system uptime, not session start). Only the
+*spatial* frame is replaced, never the clock, so §3's shared-clock contract holds.
 
-The phone's own accelerometer says it is **sitting still** while ARKit's pose **runs away**. This is
-not a heuristic or a tuned threshold: it is two sensors that must agree, and don't.
+#### `gravityTilt` — is the world frame actually level?
 
-The capture that motivated it — the phone lay on a table for **16 seconds** (accelerometer σ = 0.01
-m/s², gyro 0–1 °/s) while its reported position **accelerated to 872 m**, with single-sample steps of
-964 m, and `trackingState = normal` throughout.
+`worldAlignment = .gravity` promises world +Y is up, but **ARKit finds gravity from motion**. Start a
+session with the phone sitting still and barely move it, and the world frame can settle tens of
+degrees off vertical — with `trackingState = normal` for every single pose, and nothing in the ARKit
+API admitting it. Every downstream product (registration, reprojection, ground-plane fits) is then
+silently wrong by that angle.
 
-**The cause is degenerate geometry, not poor features.** The operator had walked a brick plaza with
-the camera pointed down; 64–83% of the view was repeating pavers. Every brick corner looks like every
-other, so matches alias by one brick — *self-consistently* — and the filter confidently integrates a
-phantom flow. A feature-count check sees nothing wrong: the scene is feature-**rich**. Any repeating
-planar texture does it — brick, tiling, carpet, decking.
+`gravityTilt` is the angle, in degrees, between ARKit's world +Y and **true gravity from CoreMotion**.
+Zero means level.
 
-Note what this catches that nothing else can: `gravityTilt` is **structurally blind** to it, because
-gravity can be perfectly correct while the position is nonsense. Watch for both; they fail
-independently.
+A tilted frame is one of two things, and they need **opposite** responses. *Un-converged* (mild and
+improving): ARKit hasn't seen enough translation, and moving the phone fixes it (measured 5.5° → 0.6°
+in 16 s). *Broken*: ARKit settles gravity early in a session and never revisits it, so the frame will
+**never** heal — a measured 110° frame was still 100° off after 40 s of walking with good tracking.
+The only cure is a **tracking reset** (flag bit 3). Magnitude does not separate the two (a 21.8° frame
+healed; a 110° one did not); *trend* does — extrapolate the improvement rate and ask if it ever gets
+there. iRTSP's UI does this and says "keep moving" or "frame is broken — reset" accordingly.
 
-The gates are `accel σ < 0.08 m/s²` and `median |gyro| < 2 °/s` sustained ≥ 1.5 s (still), against
-ARKit path length `> 0.25 m/s` (moving). A phone on a table measures σ ≈ 0.01 and an ARKit pose speed
-of ~0.004 m/s, so the margins are 8× and 60× respectively — it does not cry wolf.
+> **How frames get broken, and it's the default rig workflow:** start the phone streaming, then leave
+> it face-down on the table while you position the other cameras. ARKit initialises with no parallax,
+> guesses gravity, locks it in, and drifts. **Carry the phone while you rig, or reset before you record.**
 
-#### `reset` (bit 3) — a new world frame, not a skipped sample
+**Why the phone must send this and you cannot compute it.** A client trying to recover the tilt has
+to fit the device→camera rotation from gravity samples — and that fit is **rank-deficient whenever
+the phone stays upright**, because gravity barely moves in the device frame. The fit absorbs the tilt
+and confidently reports ~0° no matter how tilted the world really is. On-device, the device→camera
+relationship is a **known constant, not a fit**, so a single sample gives the true answer.
 
-This is the one flag it is not enough to "honour" by dropping a sample. After a reset the world
-frame is **new in every respect** — new origin, new yaw, new gravity alignment. Every pose before it
-is expressed in a frame that **no longer exists**, and there is **no transform relating the two
-sides**. Nothing carries across.
-
-So: close your current epoch, start a fresh one, and re-derive every registration from scratch. A
-consumer that merely skips the flagged sample and keeps using its existing transform will silently
-go on producing confident, wrong results.
-
-`host_ts` **does** stay continuous across a reset (verified on-device: the step across a reset is
-exactly one frame interval). `ARFrame.timestamp` runs off system uptime, not session start, so the
-shared-clock contract in §3 holds — pose and video remain on the same axis. It is only the *spatial*
-frame that is replaced, never the clock.
-
-#### 5.3.1 `gravityTilt` — is the world frame actually level?
-
-`worldAlignment = .gravity` promises world +Y is up, but **ARKit finds gravity from motion**.
-Start a session with the phone sitting still and barely move it, and the world frame can settle
-tens of degrees off vertical — with `trackingState = normal` for every pose, and nothing in the
-ARKit API admitting it. A measured capture ran **21.8° off**, silently corrupting every
-registration derived from it.
-
-`gravityTilt` is the angle between ARKit's world +Y and **true gravity from CoreMotion**. Zero
-is level.
-
-**A tilted frame is one of two very different things, and they need opposite responses.**
-
-*Un-converged* (mild, and improving): ARKit simply hasn't seen enough translation yet. Moving the
-phone genuinely fixes it — measured 5.5° → 0.6° in 16 seconds on a fresh session, and 21.8° → 2.0°
-across two board showings in the field.
-
-*Broken* (and it will never fix itself): ARKit settles its gravity alignment early in a session and
-**does not revisit it**. Measured: a frame 110° off — world "up" pointing sideways — was still 100°
-off after 40 seconds of walking with 417 poses of `normal` tracking. No amount of movement recovers
-this. The only cure is a **tracking reset** (flag bit 3).
-
-Note that magnitude does **not** separate the two — a 21.8° frame healed while a 110° frame did not,
-but there is no threshold between them. *Trend* separates them: extrapolate the rate of improvement
-and ask whether it will ever reach level. iRTSP's own UI does exactly this, and warns "keep moving"
-or "frame is broken — reset" accordingly.
-
-> **How frames get broken — and it's the default rig workflow.** Start the phone streaming, then set
-> it face-down on the table while you spend two minutes positioning the other cameras. ARKit
-> initialises with no parallax and no visual features, infers gravity from whatever it can, locks
-> that in, and drifts. By the time you pick the phone up, its world frame is unrecoverable and
-> nothing in ARKit's API will tell you. **Carry the phone while you rig, or reset tracking before you
-> record.**
-
-**You cannot compute this on the client.** Recovering it there means fitting a device→camera
-rotation from gravity samples, and that fit is **rank-deficient whenever the phone stays
-upright**: gravity barely moves in the device frame, so the fit absorbs the tilt and reports
-~0° no matter how tilted the world really is. On-device the device→camera relationship is a
-**known constant, not a fit**, so a single sample gives the true answer.
-
-`gravityAzimuth` is `atan2(z, x)` of world-frame gravity's horizontal component — meaningless
-and unstable as the tilt → 0. Together the pair carries the full two degrees of freedom of a
-unit vector, so you can rebuild world-frame gravity and hence the rotation that *levels* the
-frame:
+`gravityAzimuth` is `atan2(z, x)` of world-frame gravity's horizontal component — which way the frame
+leans. It is meaningless (and numerically unstable) as the tilt approaches zero. Together the pair is
+exactly the two degrees of freedom of a unit vector, so you can rebuild world-frame gravity, and
+hence the rotation that levels the frame:
 
 ```python
+import math
 t, a = math.radians(gravity_tilt), math.radians(gravity_azimuth)
 g_world = (math.sin(t) * math.cos(a), -math.cos(t), math.sin(t) * math.sin(a))
-# == (0, -1, 0) exactly when ARKit's frame is perfectly level
+# g_world == (0, -1, 0) exactly when ARKit's frame is perfectly level
 ```
 
-**It is already a robust estimate — do not median it yourself.** CoreMotion's gravity is a fusion
-whose accelerometer correction goes transiently wrong while the device is being accelerated, so a
-raw per-sample tilt spikes under motion (measured: a level frame reading 0.3° at rest spiked to
-14.5° while the phone was waved around). The phone rejects gravity samples taken above **0.20 g**
-of linear acceleration and medians the rest over a **2-second** window.
+**It is already a robust estimate — you do not need to median it.** CoreMotion's gravity is a fusion
+whose accelerometer correction goes transiently wrong while the device is being accelerated, so a raw
+per-sample tilt spikes under motion (measured: a level frame reading 0.3° at rest spiked to 14.5°
+while the phone was waved). The phone rejects gravity samples taken above **0.20 g** of linear
+acceleration and medians the rest over a **2-second** window. A hand-held board showing sits at a
+median of 0.04–0.07 g and never goes more than 0.19 s without an acceptable sample, so the estimate
+stays alive throughout; walking (0.1–0.3 g) still feeds it ~92% of its samples.
 
-For reference, so you can predict when it will and won't have a value: a hand-held calibration-board
-showing sits at a median of **0.04–0.07 g**, and never goes more than **0.19 s** without an
-acceptable sample — so the estimate stays alive throughout, with 90–100% of samples feeding the
-median. Walking runs 0.1–0.3 g and still accepts ~92% of samples, which matters because walking is
-exactly when ARKit's frame converges.
+**NaN means "the phone cannot currently vouch for a value" — treat it as NOT level.** You will see it
+in raw IMU mode (no fused gravity), before the first trustworthy sample, and **mid-session whenever
+the device has been in sustained motion long enough for every trustworthy sample to age out**. That
+last case is deliberate: reporting a stale value with a fresh timestamp would be the same bug as
+`trackingState = normal` on a 30°-off frame. Never treat NaN as level, and never treat an exact
+`(0.0, 0.0)` pair (what older apps sent) as level either.
 
-**NaN means "the phone cannot currently vouch for a value". Treat it as NOT level.** You will see
-it in raw IMU mode (no fused gravity), before the first trustworthy sample arrives, and
-**mid-session whenever the device has been in sustained motion long enough for every trustworthy
-sample to age out**. That last case is deliberate: holding a stale value under a fresh timestamp
-would be the same failure as `trackingState = normal` on a 30°-off frame.
+Frame: **gravity-aligned world (+Y is up, against gravity; X/Z yaw is arbitrary, not north),
+origin at session start**. `host_ts` is `ARFrame.timestamp` (same axis as the video PTS), and the
+pose and the video frame carrying the same `host_ts` come from *the same `ARFrame`* — the encoded
+image is literally the buffer ARKit derived the pose from, so there is no lens, crop, or warp
+between them. Rate follows ARKit (~60 Hz). This is iRTSP's own on-device VIO estimate — useful as
+ground-truth/comparison or a prior, not a substitute for your own fusion if you want raw inputs.
 
-Older apps zero-filled these bytes, so also treat an exact `(0.0, 0.0)` pair as *unreported*,
-**not** as a perfectly level frame — that mistake is the precise false negative this field exists
-to catch.
+**Stabilization is never applied** to a stream carrying odometry: in AR pose mode ARKit's
+`capturedImage` is the raw sensor frame (no `AVCaptureConnection` is in the pipeline at all), and
+on the normal capture path stabilization is force-disabled whenever any IMU/VIO channel is up.
 
-**Autofocus is ON by default in AR pose mode, and you should leave it on.** A moving lens does
-mean `fx`/`fy` breathe a few percent mid-stream (the type-5 records report it honestly, so your
-projection is right per-frame but not constant), which sounds like a reason to lock focus. It
-isn't, for close work: ARKit's locked focus is set for far tracking, and on an iPhone main
-camera (f ≈ 6.9 mm, f/1.8) the hyperfocal distance is ≈ 5.3 m — locked at infinity nothing
-nearer than ~5.3 m is sharp, and even locked at 1 m the near limit is ~0.84 m. A calibration
-board at 0.5 m is outside the sharp zone for any plausible lock, costing you corner detections
-on the exact ritual registration depends on. Autofocus was also suspected of causing a large
-pose-vs-image misalignment and was **measured and exonerated** (the lens hunted identically in
-the good and bad windows; the culprit was the un-converged gravity frame above). Lock focus only
-when your subject is beyond ~5 m *and* a constant focal length genuinely matters.
+**Autofocus is ON by default in AR pose mode**, and you should almost certainly leave it on.
+
+The lens moving does mean `fx`/`fy` breathe a few percent mid-stream — the intrinsics records report
+that honestly, so your projection is correct per-frame but not *constant*. That sounds like a reason
+to lock focus, and it is the conventional advice. It is nevertheless the wrong call for close work,
+for a reason that has nothing to do with tracking: **ARKit's locked focus is set for far tracking**.
+On an iPhone main camera (f ≈ 6.9 mm, f/1.8) the hyperfocal distance is ≈ 5.3 m — locked at infinity,
+nothing nearer than ~5.3 m is sharp; even locked at 1 m the near limit is ~0.84 m. A calibration
+board at 0.5 m is outside the sharp zone for any plausible lock, so locking costs you corner
+detections on the exact ritual your registration depends on. Measured with autofocus on: 0.58 px
+reprojection at 21–24 corners.
+
+Lock focus only when your subject is beyond ~5 m *and* a constant focal length genuinely matters.
+
+> Historical note, so nobody re-derives this from first principles: autofocus was once suspected of
+> causing a large pose-vs-image misalignment. It was measured and **exonerated** — the lens hunted
+> identically in the good and bad windows (1.98% vs 2.13% `fx` spread), and a ±10% focal sweep moved
+> the bad window's error by 1°. The actual culprit was an un-converged ARKit gravity frame, which is
+> what `gravityTilt` now reports.
 
 **Type 11 — Camera format / rolling-shutter fingerprint** (protocol **2.1**; state channel —
 snapshot on connect + 10 s keyframes + immediate re-emit on change, §5.2a)
@@ -531,7 +464,7 @@ treat these as a keyed starting point, never ground truth.
 | 41 | `capture_path` (u8) | 0 AVCapture · 1 ARKit |
 | 42 | `flags2` (u8) | bit0 binned · bit1 cropped |
 | 43 | `readout_direction` (u8) | 0 unknown · 1 `+Y` (top→bottom) · 2 `-Y` · 3 `+X` (left→right) · 4 `-X`. **The axis `α(row)` runs along, in delivered-image coordinates** (after the app's rotation). |
-| 44 | `pts_convention` (u8) | 0 unknown · 1 first-row-start · 2 frame-center · 3 last-row-end · 4 exposure-start |
+| 44 | `pts_convention` (u8) | 0 unknown · 1 first-row-start · 2 frame-center · 3 last-row-end · 4 exposure-start · **5 readout-instant** (what this app ships — see below) |
 | 45 | `pts_provenance` (u8) | 0 unknown · 1 documented · 2 measured |
 | 46 | `readout_provenance` (u8) | 0 absent · 1 probed |
 | 47..64 | — | reserved (0) |
@@ -573,22 +506,48 @@ not "degraded". Never read a value without checking the provenance byte.
 > a flicker source in the high hundreds of Hz, or a gyro-based fit.
 
 **`pts_convention` — declared, with provenance.** This is *what instant a frame's PTS denotes*
-relative to the readout window, and it is the anchor for the row-time model
-`t(row) = t_frame + Δt + α(row)·t_r`. `pts_provenance = documented` means this is a **declared
-default from Apple's documentation / the pipeline, NOT an on-device measurement**;
-`pts_provenance = measured` means it was characterized on-device with the gyro rolling-shutter
-method. The convention may differ between `capture_path = avcapture` and `= arkit`; each path
-reports its own.
+relative to the readout window, and it is the anchor for the row-time model of §9.2.
+`pts_provenance = documented` means this is a **declared default** — from Apple's documentation, from
+the pipeline, or from a measurement on a *reference* device; it is **not** a measurement on the phone
+you are talking to. `pts_provenance = measured` means it was characterized on that device itself. The
+convention may differ between `capture_path = avcapture` and `= arkit`; each path reports its own.
 
-> **Characterization status (2026-07-20):** `pts_convention` currently ships as
-> `first_row_start` / **`documented`** on both paths — *not yet empirically characterized on this
-> device*. It will flip to `measured` once the gyro characterization has been run and its result
-> recorded here. **Characterization method** (to be filled on execution): record fast pure-rotation
-> motion observing tags across the frame; jointly optimise camera↔IMU rotation, camera–IMU clock
-> offset, full-frame readout time, readout direction, and gyro bias against tag-corner reprojection
-> with per-row time `t_k = t_i + Δt_CI + α(y_k)·t_r`; the recovered PTS anchor and its sign are the
-> measured convention. Record here: **method · device · physical camera · resolution · fps · iOS
-> version · result** — so a future iOS behavior change is a diffable claim, not a silent drift.
+**The shipped value is `readout_instant` (5), and it deliberately claims less than the other four.**
+It means: `host_ts` marks a **read** instant — an exposure *end* — of one fixed row, plus a constant
+per-format latency `D`. So `t_anchor = host_ts − exposure − D`, where `t_anchor` is when row 0 began
+integrating. Two consequences, both easy to get wrong:
+
+* **The anchor moves one-for-one with exposure.** Subtract *this frame's* `exposure_us` (type 5,
+  revision 5). Under auto-exposure the shutter moves every frame, and a fixed per-format offset is
+  wrong by however far it moved — an error that looks like noise in a fit rather than like a bug.
+* **`D` is one unknown, not two, and the row it refers to is not recoverable.** Row 0's read and the
+  last row's read differ by exactly `t_r` — but `k·t_r(format)` and a per-format constant offset are
+  the same function of format, so no experiment over formats can separate them. `D` is absorbed whole
+  by any camera↔clock offset calibration (a gyro fit, a rig sync), and it cancels *exactly* in
+  row-to-row and frame-to-frame differences. Relative row timing needs no calibration at all.
+
+> **Characterization status (2026-08-01, replacing the 2026-07-20 placeholder).**
+> **Result: the anchor is a read-out instant that tracks exposure one-for-one** — `dt_anchor/d(exposure) = 1`.
+>
+> **Device · method.** iPhone 17 Pro, iOS 26.1, rear wide, AVCapture, 3840×2160 @ 60 fps. Not the
+> gyro method that was planned: an LED driven at a known frequency (Arduino, ~1000 Hz, 14 ppm) is
+> imaged, and the *residual phase* of its banding is tracked while only the **exposure time** is
+> swept. The LED's phase does not depend on the camera's shutter, so any movement of the fitted
+> phase is movement of the anchor — the derivative of the anchor with respect to exposure, read
+> directly. ABBA (low-high-high-low) blocking cancels linear clock drift; per-block spread 0.009 rad.
+> **Measured slope +3191 rad/s against +πf = +3142 predicted for a read-referenced anchor; the
+> neighbouring candidate (exposure-*start*-referenced) is a full πf away.** Decisive.
+>
+> **What was refuted.** A follow-up test compared formats pairwise to split `D` into `k·t_r`
+> (`k = 0` → row 0 is read, `k = 1` → the last row is read). Three pairs **refuted the model**: best
+> residual 0.520 rad against 0.02 rad of measurement noise. Formats differ by more than their readout
+> times — each carries its own constant offset — and since `k·t_r(format)` and that offset are the
+> same function of format, `k` is absorbed entirely. **This is structural. More pairs will not help,
+> and the experiment is not worth repeating.**
+>
+> **Why `documented` and not `measured`.** The result above is one device. It ships as a prior for
+> every device, which is exactly what `documented` means here. A build that has run this
+> characterization on the phone it is running on may report `measured`; none currently does.
 
 **A mid-session `format_id` change is a take-validity event.** iRTSP forces a single physical camera
 and disables auto lens-switching whenever odometry is up, so within a session the format is normally
@@ -720,7 +679,7 @@ rather than fixed-size.
 ```
 On connect: [u32 LE handshake_len][UTF-8 JSON handshake]
 Per frame:  [u32 LE frame_len][frame_len bytes = 32-byte header + payload]
-Client → server (optional, v2): [u32 LE len][UTF-8 JSON control message] — see §6.1
+Client → server (optional, v2): [u32 LE len][UTF-8 JSON control message] — see compression below
 ```
 
 **32-byte frame header** (little-endian):
@@ -728,7 +687,7 @@ Client → server (optional, v2): [u32 LE len][UTF-8 JSON control message] — s
 | Offset | Type | Field |
 |---|---|---|
 | 0 | u8 | `type` = 10 |
-| 1 | u8 | `flags` (bit0 = samples are float16, bit1 = payload compressed, §6.1) |
+| 1 | u8 | `flags` (bit0 = samples are float16, bit1 = payload compressed) |
 | 2 | u16 | `seq` |
 | 4 | u32 | reserved |
 | 8 | f64 | `host_ts` |
@@ -736,30 +695,18 @@ Client → server (optional, v2): [u32 LE len][UTF-8 JSON control message] — s
 | 24 | u16 | `width` |
 | 26 | u16 | `height` |
 | 28 | u8 | `bytesPerPixel` (2) |
-| 29 | u8 | `codec` (0 raw · 1 lzfse · 2 zlib; only meaningful when flags bit1 is set, §6.1) |
+| 29 | u8 | `codec` (0 raw · 1 lzfse · 2 zlib; only meaningful when flags bit1 is set) |
 | 30..31 | — | padding |
 
-**Samples**: the payload (decompressed if flags bit1 — §6.1) is `width × height` **IEEE-754
-half floats**, row-major,
-each = **z-depth in meters** (distance along the optical axis, not radial range — back-project
-with `x=(u−cx)·z/fx`, `y=(v−cy)·z/fy`). Always read the per-frame header for the real dims;
-the source depends on the capture mode (app ≥ 1.1):
-
-* **Normal mode**: AVFoundation's LiDAR depth output — typically ~320×240, ≤30 Hz, with
-  Apple's default hole-filling/smoothing filter applied.
-* **ARKit pose mode**: ARKit `sceneDepth` — 256×192 at the AR camera's frame rate, aligned to
-  the AR video frames (same `host_ts` axis), so **pose + video + depth stream together** from
-  one session. (App 1.0 had no depth channel in AR mode.) `host_ts`/`unix_ts` are the same two axes as §3,
-so a depth frame drops onto the video/IMU timeline exactly like everything else.
-
-Depth resolution is lower than video; the depth-channel handshake reminds you to scale the
-intrinsics (from the IMU channel, type 5) by `depth_width / video_width` before back-projecting.
+**Payload**: `width × height` **IEEE-754 half floats**, row-major, each = **distance from the
+camera in meters** — raw, or losslessly compressed (below). `host_ts`/`unix_ts` are the same two
+axes as §3, so a depth frame drops onto the video/IMU timeline exactly like everything else.
 
 ### 6.1 Lossless compression (handshake v2, negotiated)
 
 Raw f16 depth is ~2.2 MB/s at 30 Hz — 99.98% of the link — so v2 servers offer lossless
 per-frame payload compression. It is strictly **opt-in**: a client that never negotiates keeps
-receiving raw f16, bit-identical to v1. (The `irtsp` Python client negotiates automatically.)
+receiving raw f16, bit-identical to v1.
 
 To opt in, send (any time after connect):
 
@@ -783,6 +730,9 @@ Two rules keep decoding simple and safe:
 
 The handshake's `compression` object (v2+) lists `supported` codecs and repeats these
 instructions; its absence means a v1 server (raw only, don't send control messages).
+
+Depth resolution is lower than video; the depth-channel handshake reminds you to scale the
+intrinsics (from the IMU channel, type 5) by `depth_width / video_width` before back-projecting.
 
 ---
 
@@ -835,8 +785,13 @@ while True:
         lat, lon = struct.unpack_from("<dd", r, 24)
         alt, hacc, vacc, spd, crs, sacc = struct.unpack_from("<6f", r, 40)
     elif typ == 9:  # pose
-        tx,ty,tz, track = struct.unpack_from("<4f", r, 24)
-        qx,qy,qz,qw     = struct.unpack_from("<4f", r, 48)
+        tx,ty,tz, track  = struct.unpack_from("<4f", r, 24)
+        g_tilt, g_azim   = struct.unpack_from("<2f", r, 40)
+        qx,qy,qz,qw      = struct.unpack_from("<4f", r, 48)
+        if flags & 0x01:        # world frame moved: re-anchor, don't integrate across this sample
+            reanchor(relocalized=bool(flags & 0x02), jump=bool(flags & 0x04))
+        if g_tilt == g_tilt and g_tilt > 5:   # not NaN, and off vertical
+            warn("ARKit world frame is not level — walk the phone around")
     # ... types 5,7,8 similarly per §5.3
 ```
 
@@ -854,8 +809,10 @@ while True:
   it loudly, don't paper over it. **This no longer applies to intrinsics**: from revision 3 it is
   continuous, so silence there means frames have stopped arriving, which is a much louder fault.
 - **Type-11 values are priors, not ground truth** (protocol 2.1). `readout_time_s` may be absent
-  (NaN, `readout_provenance = absent`) and `pts_convention` is `documented` until characterized —
-  always read the provenance byte, and keep your own calibration authoritative. The one field to
+  (NaN, `readout_provenance = absent`) and `pts_convention` is `documented` until characterized *on
+  the device in front of you* — always read the provenance byte, and keep your own calibration
+  authoritative. In particular `readout_instant` carries an unresolved per-format constant `D`
+  (§5.3); your own camera↔clock offset absorbs it. The one field to
   trust as app-authoritative is `readout_direction` (§5.3). A mid-session `format_id` change is a
   take-validity event, not a routine update.
 - **Drops, not backpressure.** Both odometry channels are fire-and-forget with bounded buffers:
@@ -893,15 +850,15 @@ A take recorded on the phone (§2.1) is a self-contained bundle:
   thumbnail.jpg
 ```
 
-As §2.1 promised, the sidecars use the **same byte layout as the live channels** — everything in §5
-and §6 applies unchanged, and the parser you already have reads them with no new code.
+The sidecars are the **same byte layout as the live channels**, so a parser you already have reads
+them with no new code. Everything in §5 applies unchanged.
 
-If you are handed several takes at once, they arrive as one `takes_export.zip` with a folder per
-take, each holding exactly the files above for that take. Folder names come from the take's title and
-fall back to its bundle id when two selected takes share a title, so treat the folder name as a label
-and the manifest's `id` as the key. A one-take export has no wrapping folder.
+**Several takes at once.** The library can export a selection in a single archive: `takes_export.zip`,
+one folder per take, each holding exactly the files described below for that take. Folders are named
+after the take's title, falling back to its bundle id when two selected takes share a title — so the
+folder name is stable but not a key; the manifest's `id` is. A one-take export has no wrapping folder.
 
-### 9.1 The per-sensor CSV exports
+### 9.1 The advanced exporter's CSVs
 
 The phone can also export per-sensor CSVs from a take. Columns:
 
@@ -1005,7 +962,8 @@ refocuses. If you want a change threshold, apply your own — you know your erro
 (`0` locked, `1` autoFocus, `2` continuousAutoFocus, `0xFF` unknown) and `adjusting_focus`
 (`1` hunting, `0` settled, `0xFF` unknown). On the ARKit path all three are unknown — ARKit exposes
 no focus signal at all, and the only focus fact pose mode has is
-`capture_settings.video.arkit_autofocus` in the handshake.
+`capture_settings.video.arkit_autofocus` in the handshake. **`exposure_duration` is not in that
+group**: it is present on both paths, and on ARKit it is exact (age `0`), not recency-joined.
 
 **These three are joined to the frame by recency, not by identity — and revision 4 says how loosely.**
 `fx`/`fy`/`ox`/`oy` come from an attachment on the frame's own sample buffer: same object, same
@@ -1071,7 +1029,9 @@ t_frame = t_anchor + t_r / 2 + exposure_duration / 2
 
 > **`host_ts` marks a READ-OUT instant — measured, not assumed.** An earlier revision of this
 > section warned that `delta` was unknown and uncertain "by about one `exposure_duration`". It has
-> since been measured on an iPhone 17 Pro, and that is exactly what it turned out to be.
+> since been measured on an iPhone 17 Pro, and that is exactly what it turned out to be. The type-11
+> record says so on the wire: `pts_convention = readout_instant` (5). It shipped as `first_row_start`
+> until 2026-08-03; if you pinned that value, the model above is the correction.
 >
 > The method: the residual phase of a driven LED cannot give the anchor on its own (the anchor and
 > the LED's own phase are inseparable), but it *can* give the anchor's **derivative with respect to
@@ -1082,6 +1042,10 @@ t_frame = t_anchor + t_r / 2 + exposure_duration / 2
 > **The consequence that matters: the anchor moves one-for-one with the exposure.** Under
 > auto-exposure it therefore changes *every frame*, so use the per-frame `exposure_us` from the
 > type-5 record (revision 5). A fixed per-format offset is wrong by however much the exposure moves.
+> `exposure_us` is populated on **both** capture paths — on ARKit it comes from
+> `ARCamera.exposureDuration` and is exact (`exposure_age_ms = 0`), unlike the focus fields beside
+> it, which really are AVCapture-only. A take whose `exposure_us` column is empty throughout predates
+> this and cannot be row-corrected; only its row *differences* are recoverable.
 >
 > **`D` is a per-format constant and is not decomposable.** It contains whichever read instant is
 > meant — the first row leaving the sensor (`D = 0`) or the last (`D = t_r`) — plus any per-format
@@ -1121,15 +1085,20 @@ divisor is `W`, not `H`, and a pixel's readout time depends on its `x` and not i
 Concretely, this app reports `+y` when it applies no rotation, `-x` at 90 degrees, `-y` at 180 and
 `+x` at 270.
 
-**What is measured and what is assumed.** `exposure_duration` is the device's own value (sampled
-asynchronously, so `exposure_age` says how stale). `readout_time_s` is Apple's own
-`CameraFrameReadoutTime` for that capture format, present only when the readout probe is enabled —
-`readout_provenance = absent` otherwise, which is a valid state meaning nobody has probed that format.
-But **which instant `host_ts` names within the sweep is a convention, not a measurement**:
-`pts_convention` reports `first_row_start` with `pts_provenance = documented`, and Apple's headers
-document nothing about it. The residual uncertainty is on the order of one `exposure_duration`.
-Resolving it needs on-device characterisation, at which point `pts_provenance` becomes `measured` —
-never assume it already is.
+**What is measured and what is assumed.** `exposure_duration` is the device's own value — on
+AVCapture sampled asynchronously (so `exposure_age` says how stale), on ARKit exact and `age 0`.
+`readout_time_s` is Apple's own `CameraFrameReadoutTime` for that capture format, present only when
+the readout probe is enabled — `readout_provenance = absent` otherwise, which is a valid state
+meaning nobody has probed that format, and the *expected* state on recent iPhones, which stopped
+writing that metadata (§5.3).
+
+**Which instant `host_ts` names is now measured, but only partly.** It is a read-out instant that
+moves one-for-one with exposure, so `t_anchor = host_ts − exposure_duration − D`. What remains
+unknown is `D`, a **constant per format** — and unlike the old one-`exposure_duration` uncertainty,
+a constant is the benign kind: it is absorbed by any camera↔clock offset you calibrate, and it
+cancels exactly in every row-to-row and frame-to-frame difference. The part that used to be silently
+wrong — an anchor that drifts with the shutter — is the part that is now pinned. See §5.3 for the
+measurement and for why `D` cannot be decomposed further.
 
 ### 9.2b Which of these are instants, and which are durations
 
@@ -1160,21 +1129,21 @@ rather than a clock, so never mix it with the durations above. Use `host_ts`.
 
 `width` / `height` in an intrinsics record are the resolution **the intrinsics are expressed in** —
 the frames the camera actually delivered — and as of app 1.5 that is also the resolution of
-`video.mov`. The app never silently upscales: the encoder and the recording writer are both sized
-from the format capture resolved to, on the ARKit and AVCapture paths alike, and the phone's
-settings screen offers only formats the active mode can really produce. The size chosen, the size
-captured, and the size in the file are one and the same.
+`video.mov`. The app never upscales: the encoder and the recording writer are both sized from the
+format capture resolved to, on the ARKit and AVCapture paths alike, and the settings screen offers
+only formats the active mode can actually produce. So the size you pick, the size that is captured,
+and the size in the file are one and the same.
 
-This is worth stating because several things restrict which formats exist — ARKit pose mode, LiDAR
-depth, Multi-Cam, and 10-bit (HDR / Log) color pipelines. In app 1.4 and earlier a restricted mode
-still encoded at the *requested* size, upscaling from smaller source frames and leaving the
-intrinsics in a different pixel frame from the video — a silent scale error for anything solving
-geometry from them.
+This matters because several things restrict which formats exist — ARKit pose mode, LiDAR depth,
+Multi-Cam, and 10-bit (HDR / Log) color pipelines. Previously a restricted mode still encoded at the
+*requested* size, upscaling from smaller source frames and leaving the intrinsics in a different
+pixel frame from the video. That no longer happens.
 
-**Reading older takes (app ≤1.4):** do not assume the two agree. Compare the intrinsics
-`width`/`height` with the video's dimensions and, where they differ, scale `fx`, `fy`, `ox`, `oy`
-by the ratio — all four scale linearly. The type-11 `format` record (§5.3) carries the delivered
-geometry if you would rather confirm than infer.
+**Older takes (app ≤1.4):** do not assume the two agree. Check the intrinsics `width`/`height`
+against the video's dimensions and, if they differ, scale `fx`, `fy`, `ox`, `oy` by the ratio — they
+all scale linearly. The type-11 `format` record (§5.3, protocol 2.1) carries the delivered geometry
+if you want to confirm per take rather than infer.
 
-Scaling intrinsics to the image you are actually using is the right habit either way: depth already
-requires it (§6 — scale by `depth_width / video_width`), and it is a no-op when the ratio is 1.
+Scaling intrinsics to the image you are actually using remains the right habit regardless: it is
+already required for depth (§6 — scale by `depth_width / video_width`), and it costs nothing when
+the ratio is 1.
