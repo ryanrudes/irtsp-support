@@ -960,10 +960,25 @@ refocuses. If you want a change threshold, apply your own — you know your erro
 
 **Focus telemetry tells you _why_ `fx` moved.** `lens_position` (0…1), `focus_mode`
 (`0` locked, `1` autoFocus, `2` continuousAutoFocus, `0xFF` unknown) and `adjusting_focus`
-(`1` hunting, `0` settled, `0xFF` unknown). On the ARKit path all three are unknown — ARKit exposes
-no focus signal at all, and the only focus fact pose mode has is
-`capture_settings.video.arkit_autofocus` in the handshake. **`exposure_duration` is not in that
-group**: it is present on both paths, and on ARKit it is exact (age `0`), not recency-joined.
+(`1` hunting, `0` settled, `0xFF` unknown). **`exposure_duration` is not one of these**: it is
+present on both paths, and on ARKit it is exact (age `0`), not recency-joined.
+
+**On the ARKit path the three focus fields are reported when — and only when — the device actually
+reports them.** `ARCamera` exposes no lens position, no focus mode and no adjusting flag; there is no
+such API. But the *shared* `AVCaptureDevice` is documented as readable "at any time, regardless of
+focus mode" and as key-value observable, and nothing requires the observer to be the session driving
+the camera. So pose mode now watches it while ARKit holds the lens.
+
+The mechanism is built so it cannot fabricate. Unlike the AVCapture path, it **never seeds from a
+read** — a read proves nothing there, since `lensPosition` defaults to `1.0` and a stale value from
+an earlier session would look identical to a live one. Only a KVO callback is recorded, and a
+callback cannot arrive unless the property genuinely changed. So:
+
+* Notifications arrive → real readings, real ages, same semantics as AVCapture.
+* No notifications → no readings at all, all three unknown, ages blank — exactly the old behaviour.
+
+**A blank age therefore keeps one meaning on both paths: nothing was ever reported.** It never means
+"reported, but we're unsure when". Read the ages, not the presence of the column.
 
 **These three are joined to the frame by recency, not by identity — and revision 4 says how loosely.**
 `fx`/`fy`/`ox`/`oy` come from an attachment on the frame's own sample buffer: same object, same
