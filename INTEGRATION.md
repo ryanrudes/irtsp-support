@@ -457,7 +457,7 @@ treat these as a keyed starting point, never ground truth.
 
 | Offset | Field | |
 |---|---|---|
-| 24 | `format_id` (u32) | stable fingerprint of the capture mode; **changes iff the format changes** — key your calibration table / detect a mid-session switch by this |
+| 24 | `format_id` (u32) | stable fingerprint of the capture mode **and the delivered geometry** — lens, capture path, delivered size, rate, binning/cropping, pixel format and `readout_direction`. Key your calibration table on it. It changes iff one of those changes, which includes **rotating the device** (see §5.3) — so a change is not by itself a sensor-mode switch |
 | 28 | `width`, `height` (u16×2) | delivered pixels (what the RTP video carries) |
 | 32 | `fps` (f32) | frames/sec (from `videoMinFrameDuration`) |
 | 36 | `readout_time_s` (f32) | full-frame readout duration, seconds. **NaN = absent** (see `readout_provenance`) |
@@ -476,7 +476,9 @@ top→bottom; iRTSP rotates the delivered buffer to portrait (the same remap it 
 intrinsics), which carries the scan axis onto a *different* delivered axis. Because the app owns
 that rotation, only the app knows the mapping — the same "on-device knowledge you can't recover
 downstream" category as `gravityTilt`. In the ARKit path (`capture_path=1`) the image is delivered
-un-rotated (sensor-native landscape), so readout is `+Y`. The direction is **derived from the
+un-rotated (sensor-native landscape), so the *derivation* gives `+Y` — but read the byte rather
+than assuming it: if this format has been measured and the sensor scans against the derivation, the
+app ships the measured direction here too. The direction is **derived from the
 applied rotation, not measured** — the assumption that native readout is top→bottom, and the exact
 sign, are what the gyro characterization below confirms — **and `direction_provenance` (@47) now says
 which of those two you are looking at.**
@@ -487,6 +489,16 @@ left the app's most-trusted field the one a consumer could say least about. `der
 value was computed from the rotation the app applies, resting on the assumption that native readout
 runs top→bottom. `measured` (2) means the app's own rolling-shutter measurement observed it for
 **this** capture format, recovering direction from banding and not resting on that assumption at all.
+
+**`measured` is still a per-take value, not a stored constant.** The measurement is made in
+delivered-image coordinates, and those depend on the rotation the app was applying at the time — so a
+`+y` measured with the phone upright is the same physical finding as a `−y` measured inverted, and
+neither may be copied onto a take at the other orientation. What the app stores and reuses is the one
+thing that survives a rotation: whether the sensor scans the way the derivation assumes. That bit is
+applied to *this* take's own derivation, so `readout_direction` always describes the orientation the
+frames were actually captured at, whichever provenance it carries. A consumer needs no correction of
+its own — but must not cache the direction across an orientation change, any more than it would cache
+`width`/`height` across one. `format_id` moves when the direction does, so a change is visible.
 
 Note the deliberate asymmetry with `readout_time_s`: an unmeasured readout *time* is **absent**,
 because there is nothing honest to say. An unmeasured *direction* is still reported, because the
@@ -1142,7 +1154,7 @@ intrinsics `ox`/`oy` are expressed in — with `W`,`H` the delivered width and h
 
 The trap is the last column: when the direction is `±x` the swept lines are **columns**, so the
 divisor is `W`, not `H`, and a pixel's readout time depends on its `x` and not its `y` at all.
-Concretely, this app reports `+y` when it applies no rotation, `-x` at 90 degrees, `-y` at 180 and
+Concretely, when the value is `derived` this app reports `+y` when it applies no rotation, `-x` at 90 degrees, `-y` at 180 and
 `+x` at 270.
 
 **What is measured and what is assumed.** `exposure_duration` is the device's own value — on
@@ -1178,9 +1190,18 @@ expressed in, which is what makes them directly composable:
 
 ```
 report_instant   = host_ts - exposure_age          # when the shutter value was actually reported
-exposure_start(n)= host_ts + alpha(n) * readout_time
-t_frame          = host_ts + readout_time/2 + exposure_duration/2
+t_anchor         = host_ts - exposure_duration - D # D: per-format constant, see §5.3
+exposure_start(n)= t_anchor + alpha(n) * readout_time
+t_frame          = t_anchor + readout_time/2 + exposure_duration/2
+                 = host_ts - exposure_duration/2 + readout_time/2 - D
 ```
+
+> **These are the §9.2a formulas, and they are the only correct ones.** This block previously
+> carried the pre-`readout_instant` form — `host_ts + alpha·readout_time` and
+> `host_ts + readout_time/2 + exposure_duration/2` — which drops `D` and has the **wrong sign on the
+> exposure term**. Under auto-exposure that error moves frame to frame, so it appears in a fit as
+> noise rather than as a constant offset a calibration can absorb: up to ~16 ms at 60 fps. If you
+> implemented from this table rather than from §9.2a, re-derive.
 
 The one that is *not* interchangeable is `t`: it is an instant, but on the container's timeline
 rather than a clock, so never mix it with the durations above. Use `host_ts`.
