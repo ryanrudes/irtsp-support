@@ -954,6 +954,39 @@ measurement columns **empty**. A row is never filled in by carrying the previous
 forward: a held value that looks like a measured one is worse than a blank. (This is rare — it means
 a frame arrived with no intrinsic-matrix attachment. The app counts and logs it.)
 
+### 9.1b Capture settings and lens calibration in the export
+
+Alongside the CSVs, an export carries two JSON artifacts:
+
+**`<take>_capture_settings.json`** — the capture state **as applied**, read back from the device,
+with the requested config alongside so a divergence is visible: CV-mode overrides, stabilization,
+`isGeometricDistortionCorrectionEnabled` (read from hardware, not the toggle), lens switching,
+device/camera identity, delivered resolution, `format_id`, OS/app versions — and the zoom: its value
+at take start plus a timestamped log of every change during the take (host-clock axis). An empty log
+means the zoom never moved; that is stated, not implied.
+
+**`<take>_distortion.json`** (always) **and `<take>_distortion.bin`** (when recorded) — Apple's
+per-frame lens calibration from the depth path. **This is live, per-frame data, not a per-module
+constant** — measured on an iPhone 17 Pro: the lookup table changed on every one of 535 frames while
+focus swept 4.4 %, worst-case pixel effect 1.769 px at reference dimensions, with the distortion
+centre wandering sub-pixel per frame (OIS). Each record therefore carries its own `host_ts`.
+
+The JSON is written even when there is no data, with an explicit `status: "unavailable"` and a
+reason (`depth_not_streaming` vs `recorded_by_earlier_app_version`) — an absent file would be
+ambiguous between those and a failure. When data exists it carries: the record layout; the
+calibration's **reference dimensions** and the take's delivered dimensions (they generally differ,
+and can differ in aspect — a crop, not a scale); the explicit reference→delivered affine mapping
+**with the intrinsic-matrix pair it was derived from**, so the derivation is auditable rather than
+trusted; a per-take `maxPixelShiftPx` summary so a consumer can decide whether per-frame variation
+matters without parsing the stream; and ten worked **sample points** per table, computed on device
+from the take's first record — validate your lookup implementation against them in one assertion
+rather than settling table direction and radius normalisation from prose.
+
+> **Comparing tables: use `r·|Δv|` (pixels), never per-entry relative deviation.** The table's
+> entries approach zero near the centre, so float jitter in the sixth decimal place prints as
+> hundreds of percent while moving nothing by a hundredth of a pixel. Pixel displacement is
+> form-independent — both documented lookup-table conventions differ by exactly `r·Δv`.
+
 ### 9.1a `frame_gaps.csv` — the frames that didn't make it
 
 Exported alongside `intrinsics.csv`, always, because the one-to-one guarantee above is only half the
