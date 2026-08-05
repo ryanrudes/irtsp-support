@@ -982,6 +982,12 @@ matters without parsing the stream; and ten worked **sample points** per table, 
 from the take's first record — validate your lookup implementation against them in one assertion
 rather than settling table direction and radius normalisation from prose.
 
+> **ARKit pose mode has no factory distortion, permanently.** Calibration rides the depth stream,
+> and ARKit exposes no `AVCameraCalibrationData` anywhere — `ARCamera` carries the 3×3 intrinsics
+> only. This is a property of the mode, not a gap awaiting plumbing: a consumer of pose-mode takes
+> must calibrate the lens themselves (checkerboard/ChArUco), and must re-calibrate whenever the
+> video format changes, since distortion is expressed against a specific sensor crop.
+
 > **Comparing tables: use `r·|Δv|` (pixels), never per-entry relative deviation.** The table's
 > entries approach zero near the centre, so float jitter in the sixth decimal place prints as
 > hundreds of percent while moving nothing by a hundredth of a pixel. Pixel displacement is
