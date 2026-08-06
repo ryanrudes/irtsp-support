@@ -982,6 +982,14 @@ matters without parsing the stream; and ten worked **sample points** per table, 
 from the take's first record — validate your lookup implementation against them in one assertion
 rather than settling table direction and radius normalisation from prose.
 
+> **Calibration transfers between formats only at FIELD-OF-VIEW identity — and this device makes
+> the trap concrete.** Two formats sharing an FOV share the distortion field in normalised
+> coordinates (binning changes sampling, not optics; the reference→delivered mapping absorbs pixel
+> scale). Matching aspect ratio is NOT sufficient: this device offers a 4:3 depth-capable 1440×1080
+> at **69.5°** alongside the ARKit-twin 1920×1440 at **72.0°** — a different crop that an
+> aspect-ratio check accepts, and whose transferred distortion field would be wrong smoothly and
+> plausibly rather than obviously. Check `videoFieldOfView`, not shape.
+
 > **ARKit pose mode has no factory distortion, permanently.** Calibration rides the depth stream,
 > and ARKit exposes no `AVCameraCalibrationData` anywhere — `ARCamera` carries the 3×3 intrinsics
 > only. This is a property of the mode, not a gap awaiting plumbing: a consumer of pose-mode takes
